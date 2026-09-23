@@ -1,0 +1,20 @@
+__pycache__/
+*.pyc
+.DS_Store
+.venv/
+work/
+
+# Local design and acceptance history is not part of the public release.
+DESIGN.md
+ROADMAP.md
+OPEN_SOURCE_PLAN.md
+
+# Board data must never enter the source repository.
+.agent-collab/
+.agent-collab-receipts/
+events.jsonl
+*.jsonl.lock
+view.json
+/artifacts/
+/runs/
+/backups/
