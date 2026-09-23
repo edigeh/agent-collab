@@ -70,16 +70,17 @@ class PublicInstallTests(unittest.TestCase):
             self.assertNotEqual((root / "board-a" / "events.jsonl").read_bytes(),
                                 (root / "board-b" / "events.jsonl").read_bytes())
 
-            viewer_script = """import json, sys, threading, urllib.request
+            viewer_script = """import http.client, json, sys, threading
 from collab_core.viewer import make_server
 server = make_server(sys.argv[1], 0)
 thread = threading.Thread(target=server.serve_forever, daemon=True)
 thread.start()
-base = f'http://127.0.0.1:{server.server_port}'
-with urllib.request.urlopen(base + '/') as response:
-    html = response.read()
-with urllib.request.urlopen(base + '/api/board') as response:
-    snapshot = json.load(response)
+connection = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=5)
+connection.request('GET', '/')
+html = connection.getresponse().read()
+connection.request('GET', '/api/board')
+snapshot = json.loads(connection.getresponse().read())
+connection.close()
 server.shutdown()
 server.server_close()
 assert b'html' in html.lower()
