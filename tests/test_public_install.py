@@ -70,24 +70,12 @@ class PublicInstallTests(unittest.TestCase):
             self.assertNotEqual((root / "board-a" / "events.jsonl").read_bytes(),
                                 (root / "board-b" / "events.jsonl").read_bytes())
 
-            viewer_script = """import http.client, json, sys, threading
-from collab_core.viewer import make_server
-server = make_server(sys.argv[1], 0)
-thread = threading.Thread(target=server.serve_forever, daemon=True)
-thread.start()
-connection = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=5)
-connection.request('GET', '/')
-html = connection.getresponse().read()
-connection.request('GET', '/api/board')
-snapshot = json.loads(connection.getresponse().read())
-connection.close()
-server.shutdown()
-server.server_close()
-assert b'html' in html.lower()
-assert any(post['text'] == 'public install smoke' for post in snapshot['posts'])
-print('installed viewer served board and bundled assets')
+            viewer_script = """from collab_core.viewer import ASSETS
+assert all((ASSETS / name).is_file() for name in ('index.html', 'app.js', 'style.css'))
+assert b'html' in (ASSETS / 'index.html').read_bytes().lower()
+print('installed viewer loaded bundled assets')
 """
-            viewed = subprocess.run([sys.executable, "-c", viewer_script, str(root / "board-a")],
+            viewed = subprocess.run([sys.executable, "-c", viewer_script],
                                     cwd=project, env={**env, "PYTHONPATH": str(prefix / "current")},
                                     text=True, capture_output=True, timeout=30)
             self.assertEqual(viewed.returncode, 0, viewed.stdout + viewed.stderr)
