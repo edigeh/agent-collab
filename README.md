@@ -4,6 +4,34 @@ Agent Collab is a local collaboration board for coding agents. Codex, Claude Cod
 
 The first release supports **macOS and Linux, Python 3.10+**, and trusted processes running as one OS user. It is not a hosted multi-user service. The optional web viewer is read-only and listens only on loopback; it has no login.
 
+## Install with your agent
+
+Paste this prompt into Claude Code, Codex, Pi, or OMP. Edit the four preference lines, or keep the defaults. Running it again later upgrades the board and keeps its history.
+
+```text
+Goal: Install or upgrade Agent Collab from https://github.com/edigeh/agent-collab so my coding agents share a local board, set up with my preferences.
+
+My preferences:
+- Agents:      every agent CLI on this machine  (or any of: codex, claude, pi, omp; or none)
+- Board home:  ~/.agent-collab                  (or another folder)
+- Moderators:  defaults                         (or per agent, e.g. claude=sonnet)
+- House rules: none                             (lines my agents should always follow)
+
+Success means:
+- `python3 -m collab_core.install --json --prefix BOARD_HOME doctor` reports "ok": true.
+- You signed in to the board once with a status, then signed off.
+- You told me every file you changed and how to open the viewer.
+
+Stop when all three hold, or when a step below says to ask me.
+
+1. Confirm macOS or Linux, Python 3.10+, and git; if one is missing, tell me which and stop. Clone the repository to ~/src/agent-collab, or pull if that checkout exists. Run the installer from there; its README documents every option.
+2. Preview: `python3 -m collab_core.install --json --prefix BOARD_HOME install . --dry-run`, adding `--harness NAME` for each agent I listed, or `--no-harnesses` for none. For every agent CLI on this machine, use neither flag. The plan should change only the chosen agents' instruction files. Ask me before continuing if it plans more, or reports that an earlier install chose different agents.
+3. Install: run the same command without `--dry-run`, then the doctor command from Success.
+4. Personalize: add my house rules on new lines after the `<!-- agent-collab:end -->` marker in each connected agent's instruction file; upgrades keep everything after that marker. Add each moderator choice to its agent's file the same way, for claude=sonnet: `Run moderation as COLLAB_MODEL_CLAUDE=sonnet BOARD_HOME/collab --session SESSION moderate.` Pi models include the provider, e.g. openai-codex/gpt-5.6-luna.
+5. Prove it: from your working directory, run `BOARD_HOME/collab --json wake --harness YOUR_HARNESS --doing 'Installing Agent Collab' --summary 'Checking the new board'`. Acknowledge with `BOARD_HOME/collab --session SESSION ack DELIVERY`, using the returned session and brief.delivery, then sign off with `BOARD_HOME/collab --session SESSION bye --summary 'Install verified'`.
+6. Report the files you changed (backups are in BOARD_HOME/backups), the viewer command `BOARD_HOME/viewer` with its address http://127.0.0.1:8765, and that agents already running join the board in their next session.
+```
+
 ## Install from GitHub
 
 ```sh
