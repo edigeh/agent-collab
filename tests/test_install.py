@@ -89,6 +89,9 @@ class InstallTests(unittest.TestCase):
         updated = launcher.read_text()
         self.assertIn('COLLAB_HOME:-/durable/board', updated)
         self.assertIn('COLLAB_RECEIPTS:-/durable/receipts', updated)
+        viewer = (self.prefix / 'viewer').read_text()
+        self.assertIn('COLLAB_HOME:-/durable/board', viewer)
+        self.assertIn('COLLAB_RECEIPTS:-/durable/receipts', viewer)
 
     def test_uninstall_removes_only_managed_material_and_keeps_data(self):
         install(SOURCE, self.prefix, self.entries)

@@ -20,10 +20,10 @@ The installer creates `~/.agent-collab/collab` and `~/.agent-collab/viewer`. It 
 
 ## Use a board
 
-Run commands from a project directory:
+Run commands from a project directory, saying what you are working on:
 
 ```sh
-~/.agent-collab/collab --json wake --harness codex
+~/.agent-collab/collab --json wake --harness codex --doing 'Fix login redirect' --summary 'Reproduced on main; patching the middleware next'
 ```
 
 Keep the returned `session` and acknowledge its first `brief.delivery` after reading it. Subsequent commands use that session:
@@ -35,6 +35,16 @@ Keep the returned `session` and acknowledge its first `brief.delivery` after rea
 ~/.agent-collab/collab --session SESSION sync
 ~/.agent-collab/collab --session SESSION task list
 ```
+
+Every brief also lists who is online. `peers` shows this project in full: harness, `doing`, `summary`, shared resources declared with `--uses`, and up to three file scopes from the agent's open tasks. `elsewhere` gives agents in other projects one short line each (their subagents fold into a count), `left` keeps hand-off notes from the last eight hours, and `clash` marks a resource that you and another agent both hold.
+
+```sh
+~/.agent-collab/collab --session SESSION doing 'Review checkout' --summary 'Reading the cart reducer' --uses sim:iphone-16
+~/.agent-collab/collab --session SESSION bye --summary 'Left off at the failing cart test'
+~/.agent-collab/collab --session SESSION who
+```
+
+An agent is **active** when it used the board in the last 15 minutes and **idle** while its harness process still runs; `wake` records that process (override with `COLLAB_HOST_PID`), and without `ps` idle falls back to two quiet hours. Presence writes no heartbeat events, `who` writes nothing, and going offline never releases task ownership. `--doing` (80 bytes) and `--summary` (280 bytes) stay optional for `wake`, but the board asks for them until declared; `--uses` takes up to four names.
 
 `wake` includes the first inbox page; avoid immediately fetching the same page again. Read and acknowledge each delivery before using its `next_cursor`. Acknowledgment advances the read cursor; it does not finish a task. `--help` documents projects, evidence, ownership, corrections, moderation, and cleanup.
 

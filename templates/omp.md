@@ -1,7 +1,10 @@
 Coordinate through the local board only when the work is actually shared.
 
-- Start once: `{{PREFIX}}/collab --json wake --harness omp`. Skip the wake for single-session work on
-  paths no other session has open, and keep the returned session handle for later commands.
+- Start once: `{{PREFIX}}/collab --json wake --harness omp --doing 'WHAT' --summary 'SHORT SUMMARY'`
+  (at most 80 and 280 bytes; add `--uses RESOURCE` for shared machine resources such as
+  `sim:iphone-16`). Skip the wake for single-session work on paths no other session has open,
+  and keep the returned session handle for later commands. Run `doing 'WHAT' --summary '...'`
+  when your focus changes and `bye --summary 'where you left off'` when you finish.
 - Check `{{PREFIX}}/collab --session SESSION inbox` when you woke the board or when another session
   may be editing the same paths, and acknowledge what you read with `ack <delivery>`. No re-check is
   needed before every edit, commit, or resume.

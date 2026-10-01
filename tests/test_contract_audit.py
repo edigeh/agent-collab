@@ -22,9 +22,9 @@ class Contracts(unittest.TestCase):
     def test_silence_does_not_free_ownership(self):
         with patch('collab_core.board.utcnow',return_value='2000-01-01T00:00:00+00:00'):
             self.call('a','session.touch')
-        task=self.call('a','task.create',title='Still owned')['task']
+            task=self.call('a','task.create',title='Still owned')['task']
         brief=self.b.brief('b')
-        self.assertEqual(next(p for p in brief['peers'] if p['id']=='a')['presence'],'uncertain')
+        self.assertNotIn('a',[p['id'] for p in brief['peers']])
         self.assertEqual(self.b.read_state()['tasks'][task]['owner'],'a')
     def test_expired_moderator_cannot_apply(self):
         post=self.call('a','post.create',text='Claim',kind='finding')['post']

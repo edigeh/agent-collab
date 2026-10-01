@@ -35,6 +35,14 @@ class ViewerTest(unittest.TestCase):
         self.assertEqual([x['operation'] for x in result['history'][p]], ['post.create','post.report'])
         self.assertEqual(result['history'][p][0]['detail']['text'], 'Original claim')
 
+    def test_snapshot_lists_online_agents_with_status(self):
+        self.call('session.touch', status={'doing': 'Viewer tab', 'summary': 'Agents tab', 'uses': ['port:8765']})
+        for view in ('full', 'compact'):
+            agents = snapshot(self.board, view=view)['presence']
+            self.assertEqual([(a['id'], a['presence'], a['doing'], a['project']) for a in agents],
+                             [('test', 'active', 'Viewer tab', 'global')])
+            self.assertEqual(agents[0]['uses'], ['port:8765'])
+
     def test_compact_snapshot_omits_history_bodies(self):
         self.call('post.create', text='Compact discovery')
         result = snapshot(self.board, view='compact')

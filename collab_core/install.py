@@ -230,11 +230,12 @@ def _launcher(prefix, home_default=None, receipts_default=None):
             f"exec {quoted_python} {quoted_prefix}/current/collab \"$@\"\n").encode("utf-8")
 
 
-def _viewer_launcher(prefix):
+def _viewer_launcher(prefix, home_default=None, receipts_default=None):
+    # The viewer reads the same board as the collab launcher, including a relocated one.
     quoted_python = shlex.quote(sys.executable)
     quoted_current = shlex.quote(str(prefix / "current"))
-    quoted_home = shlex.quote(str(prefix))
-    quoted_receipts = shlex.quote(str(prefix) + "-receipts")
+    quoted_home = shlex.quote(str(home_default or prefix))
+    quoted_receipts = shlex.quote(str(receipts_default or str(prefix) + "-receipts"))
     return ("#!/bin/sh\n" + VIEWER_MARKER + "\n" +
             f"export COLLAB_HOME=${{COLLAB_HOME:-{quoted_home}}}\n" +
             f"export COLLAB_RECEIPTS=${{COLLAB_RECEIPTS:-{quoted_receipts}}}\n" +
@@ -278,7 +279,7 @@ def install(source, prefix="~/.agent-collab", entries=None, dry_run=False, harne
     launcher = prefix / "collab"; script = _launcher(prefix, existing_home, existing_receipts)
     if not launcher.exists() or launcher.read_bytes() != script:
         _atomic_text(launcher, script, 0o700)
-    viewer_launcher = prefix / "viewer"; viewer_script = _viewer_launcher(prefix)
+    viewer_launcher = prefix / "viewer"; viewer_script = _viewer_launcher(prefix, existing_home, existing_receipts)
     if not viewer_launcher.exists() or viewer_launcher.read_bytes() != viewer_script:
         _atomic_text(viewer_launcher, viewer_script, 0o700)
     atomic_file(prefix / INTEGRATION_FILE, canonical({"version": 1,
