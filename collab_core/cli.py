@@ -6,13 +6,17 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import uuid
 
-from .board import BRIEF_VIEWS, Board, DEFAULT_BRIEF_BUDGET, render_item
+from . import presence
+from .board import BRIEF_VIEWS, Board, DEFAULT_BRIEF_BUDGET, render_item, utcnow
 from .journal import JournalError
-from .state import HARNESSES, Rejected
+from .state import HARNESSES, Rejected, presence_status, text, timestamp
+
+DECLARE = "doing 'WHAT YOU ARE WORKING ON' --summary 'SHORT SUMMARY'"
 
 
 class CliError(ValueError):
@@ -127,9 +131,25 @@ def _capture(board, sources):
     return [board.capture(source) for source in sources or []]
 
 
+def _declared(args):
+    """Presence flags travel together: what you are doing and a short summary."""
+    if args.doing is None and args.summary is None:
+        if args.uses:
+            raise CliError("--uses needs --doing and --summary")
+        return None
+    if not args.doing or not args.summary:
+        raise CliError("--doing and --summary go together")
+    declared = {"doing": args.doing, "summary": args.summary, **({"uses": args.uses} if args.uses else {})}
+    presence_status(declared, utcnow())  # reject oversized text before anything is written
+    return declared
+
+
 def _wake(args):
     board = _board(args)
     actor = args.session or str(uuid.uuid4())
+    declared = _declared(args)
+    process = presence.detect_host(args.harness)
+    extra = {key: value for key, value in (("status", declared), ("host", process)) if value}
     # Pending observations must be reconciled before the new checkpoint.
     replayed = board.sync(actor)
     try:
@@ -137,7 +157,7 @@ def _wake(args):
     except (JournalError, OSError) as exc:
         # Receipts are outside the board directory and can survive its outage.
         # Omitted parent/project preserve an existing identity during replay.
-        data = {'harness':args.harness}
+        data = {'harness':args.harness, **extra}
         for field in ('project', 'parent', 'name'):
             value = getattr(args, field)
             if value is not None: data[field] = value
@@ -170,13 +190,15 @@ def _wake(args):
         if not project:
             project, _ = _automatic_project(board, actor, Path.cwd())
     registered = _outcome(board, actor, "session.register", {
-        "harness": args.harness, "project": project, "parent": parent, "name": name,
+        "harness": args.harness, "project": project, "parent": parent, "name": name, **extra,
     })
     if registered.get("status") != "accepted":
         return {"session": actor, "sync": replayed, "registration": registered}
     brief = board.brief(actor, project=project, limit=args.limit, offset=0,
                         view=args.view, budget=args.budget if args.view == 'compact' else None)
     next_commands = []
+    if not declared and not (prior or {}).get("status"):
+        next_commands.append(f"collab --session {actor} {DECLARE}")
     if brief.get('delivery'):
         next_commands.append(f"collab --session {actor} ack {brief['delivery']}")
     if brief.get('next_cursor'):
@@ -265,6 +287,35 @@ def _status(args):
             "moderation_due": board.due(project), "tasks": tasks}
 
 
+def _doing(args):
+    board = _board(args); actor = _session(args)
+    declared = _declared(args)
+    outcome = _outcome(board, actor, "session.touch", {"status": declared})
+    if outcome.get("status") == "accepted" and declared.get("uses"):
+        state = board.read_state()
+        view = presence.listing(state, timestamp(utcnow()), actor=actor,
+                                project=state["sessions"][actor]["project"])
+        outcome["clashes"] = [item for item in view["peers"] + view.get("elsewhere", []) if item.get("clash")]
+    return outcome
+
+
+def _bye(args):
+    data = {"leave": True, **({"summary": text(args.summary, "summary", 280)} if args.summary else {})}
+    return _outcome(_board(args), _session(args), "session.touch", data)
+
+
+def _who(args):
+    state = _board(args).read_state()
+    actor = args.session
+    if actor and actor not in state["sessions"]:
+        raise CliError("unknown session: " + actor)
+    project = args.project or (state["sessions"][actor]["project"] if actor else None)
+    if project and project not in state["projects"]:
+        raise CliError("unknown project: " + project)
+    view = presence.listing(state, timestamp(utcnow()), actor=actor, project=project, you=True)
+    return {"status": "accepted", "project": project, **view}
+
+
 def _artifact(args):
     board = _board(args); raw = board.artifact(args.sha)
     result = {"status": "accepted", "sha256": args.sha, "bytes": len(raw),
@@ -286,6 +337,28 @@ def _cleanup(args):
     if args.cleanup_command == 'preview': return board.cleanup_preview(args.sha)
     if args.cleanup_command == 'remove': return board.cleanup_remove(_session(args), args.sha, args.confirm)
     return board.cleanup_resume(_session(args), args.removal)
+
+
+def _presence_line(item):
+    ident = item["id"][:8] if re.fullmatch(r"[0-9a-f-]{32,}", item["id"]) else item["id"]
+    head = " ".join(str(part) for part in (item.get("harness"), ident, item.get("presence"),
+                    f"{item['ago']}m" if "ago" in item else None) if part)
+    if item.get("project"):
+        head += " @" + item["project"]
+    text = item.get("doing", "no status declared") + (": " + item["summary"] if item.get("summary") else "")
+    extras = ["uses " + ", ".join(item["uses"])] if item.get("uses") else []
+    if item.get("clash"):
+        extras.append("shared " + ", ".join(item["clash"]))
+    if item.get("scope"):
+        extras.append("scope " + ", ".join(item["scope"]) + (f" +{item['scope_more']}" if item.get("scope_more") else ""))
+    return f"{head} · {text}" + "".join(f" [{extra}]" for extra in extras)
+
+
+def _presence_lines(value):
+    lines = ["you: " + _presence_line(value["you"])] if value.get("you") else []
+    for key, label in (("peers", "online"), ("elsewhere", "elsewhere"), ("left", "left"), ("clashes", "clash")):
+        lines.extend(f"{label}: {_presence_line(item)}" for item in value.get(key, []))
+    return lines
 
 
 def _human(value):
@@ -330,6 +403,7 @@ def _human(value):
             for task in value["tasks"]:
                 lines.append(f"task {task['id']} r{task['revision']} {task['status']} owner={task.get('owner')}: {task['title']}")
                 lines.append("scope: " + ", ".join(task.get("scope", [])))
+        lines.extend(_presence_lines(value))
         if value.get("moderation_due"):
             lines.append(f"moderation due: {len(value['moderation_due'])} target(s); run moderate at this checkpoint")
         if value.get("instruction"):
@@ -347,6 +421,12 @@ def build_parser():
     parser.add_argument("--json", action="store_true", help="emit one JSON object")
     sub = parser.add_subparsers(dest="command", required=True)
     wake = sub.add_parser("wake"); wake.add_argument("--harness", required=True, choices=HARNESSES); wake.add_argument("--project"); wake.add_argument("--parent"); wake.add_argument("--name"); wake.add_argument("--limit", type=int, default=12); wake.add_argument("--view", choices=BRIEF_VIEWS, default='compact'); wake.add_argument("--budget", type=int, default=DEFAULT_BRIEF_BUDGET, help="maximum compact item payload in bytes"); wake.set_defaults(handler=_wake)
+    wake.add_argument("--doing", help="what you are working on (at most 80 bytes)"); wake.add_argument("--summary", help="short summary (at most 280 bytes)")
+    doing = sub.add_parser("doing", help="declare what you are working on"); doing.add_argument("doing", help="at most 80 bytes"); doing.add_argument("--summary", required=True, help="at most 280 bytes"); doing.set_defaults(handler=_doing)
+    for declaring in (wake, doing):
+        declaring.add_argument("--uses", action="append", default=[], help="shared machine resource you hold, such as sim:iphone-16 or port:8765 (repeat, at most 4)")
+    bye = sub.add_parser("bye", help="sign off, leaving an optional hand-off note"); bye.add_argument("--summary", help="where you left off (at most 280 bytes)"); bye.set_defaults(handler=_bye)
+    who = sub.add_parser("who", help="list online agents without writing to the board"); who.add_argument("--project"); who.set_defaults(handler=_who)
     sync = sub.add_parser("sync"); sync.set_defaults(handler=lambda a: {"status": "accepted", "results": _board(a).sync(_session(a))})
     project = sub.add_parser("project"); ps = project.add_subparsers(dest="project_command", required=True)
     ps.add_parser("list").set_defaults(handler=_project)

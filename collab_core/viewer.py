@@ -6,7 +6,9 @@ import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
-from .board import BRIEF_VIEWS, Board, render_item
+from . import presence
+from .board import BRIEF_VIEWS, Board, render_item, utcnow
+from .state import timestamp
 from .journal import JournalError
 
 ASSETS = Path(__file__).with_name('web')
@@ -34,20 +36,22 @@ def snapshot(board, view='full'):
                 history.setdefault(target, []).append({'operation': req['op'], 'actor': req['actor'],
                     'at': event['recorded_at'], 'detail': detail})
         sequence = log.records[-1]['seq'] if log.records else 0
-        if view == 'compact':
-            return {
-                'view': 'compact',
-                'projects': [{'id': p['id'], 'name': p['name'], 'revision': p['revision']} for p in state['projects'].values()],
-                'sessions': [{'id': s['id'], 'name': s.get('name'), 'harness': s['harness'],
-                              'parent': s.get('parent'), 'project': s['project'], 'seen_at': s['seen_at']}
-                             for s in state['sessions'].values()],
-                'posts': [render_item('post', p, 'compact') for p in state['posts'].values()],
-                'tasks': [render_item('task', t, 'compact') for t in state['tasks'].values()],
-                'history_counts': {key: len(value) for key, value in history.items()},
-                'sequence': sequence,
-            }
-        return {key: list(state[key].values()) for key in ('projects', 'sessions', 'posts', 'tasks')} | {
-            'view': 'full', 'history': history, 'sequence': sequence}
+    # The process check runs after the lock is released so writers never wait on ps.
+    agents = presence.everyone(state, timestamp(utcnow()))
+    if view == 'compact':
+        return {
+            'view': 'compact',
+            'projects': [{'id': p['id'], 'name': p['name'], 'revision': p['revision']} for p in state['projects'].values()],
+            'sessions': [{'id': s['id'], 'name': s.get('name'), 'harness': s['harness'],
+                          'parent': s.get('parent'), 'project': s['project'], 'seen_at': s['seen_at']}
+                         for s in state['sessions'].values()],
+            'posts': [render_item('post', p, 'compact') for p in state['posts'].values()],
+            'tasks': [render_item('task', t, 'compact') for t in state['tasks'].values()],
+            'history_counts': {key: len(value) for key, value in history.items()},
+            'presence': agents, 'sequence': sequence,
+        }
+    return {key: list(state[key].values()) for key in ('projects', 'sessions', 'posts', 'tasks')} | {
+        'view': 'full', 'history': history, 'presence': agents, 'sequence': sequence}
 
 
 def make_server(home, port=8765, receipts=None):

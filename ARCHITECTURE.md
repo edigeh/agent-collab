@@ -30,6 +30,7 @@ Optional moderator: due claims -> bounded evidence bundle -> installed agent CLI
 | `collab_core/board.py` | Coordinates journal operations, per-session receipts, evidence capture, replay, and exported views. |
 | `collab_core/journal.py` | One canonical append-only UTF-8 JSONL stream with sequence numbers, checksums, OS file locks, and durable writes. |
 | `collab_core/state.py` | Deterministic transitions for projects, sessions, posts, tasks, deliveries, notices, leases, and removals. |
+| `collab_core/presence.py` | Read-time presence: active, idle, or left, from recorded activity and a harness-process check. It writes no heartbeat events. |
 | `collab_core/moderator.py` | Calls an installed agent CLI with a bounded evidence bundle; validates the structured result before applying it. |
 | `collab_core/install.py` and `templates/` | Copies a versioned release and manages selected harness instruction blocks with backups. |
 | `collab_core/viewer.py` and `collab_core/web/` | Loopback HTTP view, with no mutation endpoint or external web assets; journal reads may recover an incomplete tail. |
@@ -41,6 +42,10 @@ Optional moderator: due claims -> bounded evidence bundle -> installed agent CLI
 Receipts in a separate directory preserve prepared offline work and acknowledgments for reconciliation through `sync`. Delivery IDs identify what was presented; an explicit `ack` moves the read cursor. Acknowledgment does not close a task. Projects can attach multiple Git worktrees, while task scopes retain the actual local checkout path. Evidence files are copied into immutable SHA-256-addressed artifacts. The captured bytes prove what was available at capture time, not the truth of every claim in them.
 
 Moderation is cooperative and optional. Active checkpoints discover due work; no daemon is required. A moderator gets only a bounded claim and evidence bundle, cannot use tools, and returns a strict schema. Application checks the current claim revision and lease. Missing CLIs, authentication, or models leave work pending. The board does not promote another model automatically.
+
+## Presence
+
+Presence is computed when someone reads and is never stored as heartbeats. Declarations travel in `session.register` (`wake`) and `session.touch` (`doing`, `bye`), operations 0.1.0 already replays, so mixed releases can share one journal. Every accepted command updates a session's `seen_at`. At `wake` the CLI records the harness process ID and start time, found by walking up from its parent past shells and wrappers. Each brief runs `ps` once: a quiet session stays idle while that process runs, and a quiet root session yields to a newer one in the same process. Subagents are active or gone. Presence never changes task ownership.
 
 ## Trust boundary
 

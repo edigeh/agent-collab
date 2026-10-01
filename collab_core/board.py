@@ -12,7 +12,7 @@ import tempfile
 import uuid
 
 from .journal import Journal, JournalError, JournalBusy, JournalCorrupt
-from . import state as model
+from . import presence, state as model
 
 REDUCER_VERSION = 1
 
@@ -539,12 +539,10 @@ class Board:
         has_more = bool(selected) and offset + len(selected) < len(items)
         next_cursor = base64.urlsafe_b64encode(canonical({'actor':actor, 'project':project,
             'after':item_key(selected[-1])})).decode() if has_more else None
-        peers = [{'id': p['id'], 'harness': p['harness'], 'parent': p['parent'],
-                  'presence': 'recent' if (model.timestamp(utcnow()) - model.timestamp(p['seen_at'])).total_seconds() < 900 else 'uncertain'}
-                 for p in s['sessions'].values() if p['project'] == project and p['id'] != actor]
+        roster = presence.listing(s, model.timestamp(utcnow()), actor=actor, project=project)
         return {**result, 'project': project, 'items': rendered, 'total': len(items),
                 'returned': len(rendered), 'view': view, 'budget': budget,
                 'truncated': has_more, 'reconciliation': reconciliation,
                 'next_offset': offset + len(selected) if has_more else None, 'next_cursor':next_cursor,
-                'peers': peers[:20], 'peer_count': len(peers), 'moderation_due': self.due(project),
+                **roster, 'moderation_due': self.due(project),
                 'instruction': 'Acknowledge this delivery after reading the returned items. Use next_cursor for continuation without skipping items; start a new checkpoint without a cursor. Do not repeat inbox or status just to reread this page. Use read ITEM --kind post|task|notice only when full detail is needed. Requests and open commitments remain unresolved until explicitly handled.'}

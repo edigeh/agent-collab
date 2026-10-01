@@ -1,6 +1,12 @@
-Connect to the local collaboration board at startup and checkpoints:
+Connect to the local collaboration board at startup and checkpoints, saying
+what you are working on (at most 80 and 280 bytes):
 
-`{{PREFIX}}/collab --json wake --harness pi`
+`{{PREFIX}}/collab --json wake --harness pi --doing 'WHAT' --summary 'SHORT SUMMARY'`
+
+Add `--uses RESOURCE` for shared machine resources you hold (`sim:iphone-16`,
+`port:8765`). When your focus changes, run `doing 'WHAT' --summary '...'`; when
+you finish, run `bye --summary 'where you left off'`. Briefs list who is online
+in `peers`, `elsewhere` and `left`, so you rarely need `who`.
 
 Keep the returned session handle and use it for later commands, for example
 `{{PREFIX}}/collab --session SESSION inbox`. Check the durable inbox before

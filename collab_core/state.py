@@ -79,6 +79,23 @@ def scope(value):
     require(isinstance(value, list) and len(value) <= 64, 'scope must be a list of at most 64 paths/resources')
     return sorted(set(text(x, 'scope', 1024) for x in value))
 
+def presence_status(value, recorded_at):
+    """A declared presence: what the session is doing, a summary, and shared resources it holds."""
+    require(isinstance(value, dict) and set(value) <= {'doing', 'summary', 'uses'},
+            'status takes doing, summary and optional uses')
+    uses = value.get('uses', [])
+    require(isinstance(uses, list) and len(uses) <= 4, 'uses lists at most 4 resources')
+    item = {'doing': text(value.get('doing'), 'doing', 80), 'summary': text(value.get('summary'), 'summary', 280)}
+    names = sorted({' '.join(text(use, 'resource', 48).lower().split()) for use in uses})
+    if names:
+        item['uses'] = names
+    return {**item, 'at': recorded_at}
+
+def presence_host(value, recorded_at):
+    require(isinstance(value, dict) and type(value.get('pid')) is int and 1 < value['pid'] < 2**31,
+            'host needs a process ID')
+    return {'pid': value['pid'], 'started': text(value.get('started'), 'started', 64), 'at': recorded_at}
+
 def may_manage(state, actor, owner):
     while owner:
         if actor == owner:
@@ -161,7 +178,9 @@ def apply(state, request, recorded_at, *, copy_state=True):
     now = timestamp(recorded_at)
     rid = request['id']
     if op != 'session.register':
-        entity(s, 'sessions', actor)
+        # Any accepted command is activity and returns a session that had left.
+        here = entity(s, 'sessions', actor)
+        here['seen_at'] = recorded_at; here.pop('left', None)
     result = {'id': rid}
     if not op.startswith('artifact.'):
         removing = {item['sha256'] for item in s['artifact_removals'].values() if item['status'] == 'planned'}
@@ -174,20 +193,34 @@ def apply(state, request, recorded_at, *, copy_state=True):
         parent = d.get('parent', prior.get('parent'))
         if parent:
             entity(s, 'sessions', parent); require(parent != actor, 'session cannot parent itself')
+        declared = presence_status(d['status'], recorded_at) if 'status' in d else None
+        process = presence_host(d['host'], recorded_at) if 'host' in d else None
         if actor in s['sessions']:
             item = s['sessions'][actor]
             require(item['harness'] == d['harness'] and item['parent'] == parent,
                     'session identity already registered with a different harness/parent')
-            item['seen_at'] = recorded_at; item['project'] = project
+            item['seen_at'] = recorded_at; item['project'] = project; item.pop('left', None)
         else:
-            s['sessions'][actor] = {'id': actor, 'harness': d['harness'], 'parent': parent,
+            item = s['sessions'][actor] = {'id': actor, 'harness': d['harness'], 'parent': parent,
                 'project': project, 'name': d.get('name', actor), 'seen_at': recorded_at,
                 'started_at': recorded_at, 'revision': 1}
+        if declared:
+            item['status'] = declared
+        if process:
+            item['host'] = process
         result['session'] = actor
     elif op == 'session.touch':
-        s['sessions'][actor]['seen_at'] = recorded_at
+        item = s['sessions'][actor]
         if 'project' in d:
-            entity(s, 'projects', d['project']); s['sessions'][actor]['project'] = d['project']
+            entity(s, 'projects', d['project']); item['project'] = d['project']
+        if 'status' in d:
+            item['status'] = presence_status(d['status'], recorded_at)
+        require('summary' not in d or d.get('leave') is True, 'a touch summary is a hand-off note for leave')
+        if 'leave' in d:
+            require(d['leave'] is True, 'leave must be true')
+            item['left'] = {'at': recorded_at}
+            if 'summary' in d:
+                item['left']['summary'] = text(d['summary'], 'summary', 280)
         result['session'] = actor
     elif op == 'artifact.remove.plan':
         sha = d.get('sha256'); require(isinstance(sha, str) and HASH.fullmatch(sha), 'invalid artifact hash')
