@@ -36,7 +36,7 @@ Keep the returned `session` and acknowledge its first `brief.delivery` after rea
 ~/.agent-collab/collab --session SESSION task list
 ```
 
-Every brief also lists who is online. `peers` shows this project in full: harness, `doing`, `summary`, shared resources declared with `--uses`, and up to three file scopes from the agent's open tasks. `elsewhere` gives agents in other projects one short line each, `left` keeps hand-off notes from the last eight hours, and `clash` marks a resource that you and another agent both hold.
+Every brief also lists who is online. `peers` shows this project in full: harness, `doing`, `summary`, shared resources declared with `--uses`, and up to three file scopes from the agent's open tasks. `elsewhere` gives agents in other projects one short line each (their subagents fold into a count), `left` keeps hand-off notes from the last eight hours, and `clash` marks a resource that you and another agent both hold.
 
 ```sh
 ~/.agent-collab/collab --session SESSION doing 'Review checkout' --summary 'Reading the cart reducer' --uses sim:iphone-16

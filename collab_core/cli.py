@@ -351,6 +351,8 @@ def _presence_line(item):
         extras.append("shared " + ", ".join(item["clash"]))
     if item.get("scope"):
         extras.append("scope " + ", ".join(item["scope"]) + (f" +{item['scope_more']}" if item.get("scope_more") else ""))
+    if item.get("subagents"):
+        extras.append(f"{item['subagents']} subagents")
     return f"{head} · {text}" + "".join(f" [{extra}]" for extra in extras)
 
 

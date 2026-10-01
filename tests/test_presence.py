@@ -171,6 +171,8 @@ class ListingTests(BoardCase):
         self.wake('gone', 60, host=host(103), status={'doing': 'Old', 'summary': 'Process ended'})
         self.wake('away', 118, 'codex', project='q', status={'doing': 'LP copy', 'summary': 'Hidden here',
                                                               'uses': ['sim:iphone-16']})
+        self.wake('helper', 118, 'codex', project='global', parent='away')
+        self.wake('helper2', 117, 'codex', project='q', parent='away')
         self.wake('quitter', 80, status={'doing': 'Spec', 'summary': 'Writing spec'})
         self.call('quitter', 'session.touch', 90, leave=True, summary='Left off at tests')
         self.wake('oldquit', -500, status=STATUS)
@@ -189,9 +191,10 @@ class ListingTests(BoardCase):
             'scope': ['README.md', 'collab_core/board.py', 'collab_core/cli.py'], 'scope_more': 1})
         self.assertEqual(view['peers'][0]['parent'], 'peer')
         self.assertEqual(view['peers'][2]['presence'], 'idle')
+        # Other projects' subagents fold into their parent's line.
         self.assertEqual(view['elsewhere'], [{'id': 'away', 'harness': 'codex', 'presence': 'active', 'ago': 2,
                                               'project': 'Alonga', 'doing': 'LP copy', 'uses': ['sim:iphone-16'],
-                                              'clash': ['sim:iphone-16']}])
+                                              'clash': ['sim:iphone-16'], 'subagents': 2}])
         self.assertEqual(view['left'], [{'id': 'quitter', 'harness': 'claude', 'presence': 'left', 'ago': 30,
                                          'doing': 'Spec', 'summary': 'Left off at tests'}])
         self.assertIn('gone', [p['id'] for p in self.listing(live=False)['peers']])

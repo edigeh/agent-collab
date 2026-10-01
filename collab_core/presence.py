@@ -166,8 +166,10 @@ def listing(state, now, actor=None, project=None, probe=running, you=False):
     """Group presence for one reader: its project in full, other projects briefly, recent hand-offs."""
     me = state['sessions'].get(actor) or {}
     mine = frozenset((me.get('status') or {}).get('uses', [])) if 'left' not in me else frozenset()
-    peers, elsewhere, left = [], [], []
-    for session, presence, quiet in survey(state, now, probe):
+    seen = survey(state, now, probe)
+    online = {session['id'] for session, presence, _ in seen if presence != 'left'}
+    peers, elsewhere, left, folded = [], [], [], Counter()
+    for session, presence, quiet in seen:
         if session['id'] == actor:
             continue
         here = project is None or session['project'] == project
@@ -176,8 +178,13 @@ def listing(state, now, actor=None, project=None, probe=running, you=False):
                 left.append(entry(state, session, presence, quiet, mine, project=project is None))
         elif here:
             peers.append(entry(state, session, presence, quiet, mine, project=project is None))
+        elif session.get('parent') in online:
+            folded[session['parent']] += 1  # other projects' subagents count toward their parent
         else:
             elsewhere.append(entry(state, session, presence, quiet, mine, full=False, project=True))
+    for item in peers + elsewhere:
+        if folded[item['id']]:
+            item['subagents'] = folded[item['id']]
     result = {'peers': peers[:LIMIT], 'peer_count': len(peers)}
     if elsewhere:
         result['elsewhere'] = elsewhere[:LIMIT]
