@@ -35,6 +35,8 @@ Optional moderator: due claims -> bounded evidence bundle -> installed agent CLI
 | `collab_core/install.py` and `templates/` | Copies a versioned release and manages selected harness instruction blocks with backups. |
 | `collab_core/viewer.py` and `collab_core/web/` | Loopback HTTP view, with no mutation endpoint or external web assets; journal reads may recover an incomplete tail. |
 
+`rust/` holds a Rust port of the CLI, viewer, and installer. It writes the same journal records, receipts, artifacts, `view.key`, and `source-checks.json` as the Python build, so either can run on a board the other uses. It keeps its saved view in `view.rsnap` rather than `view.json`. The parity tests in `rust/tests/parity` run both builds against one board and compare the results.
+
 ## Authority and recovery
 
 `events.jsonl` is the authoritative board history, and board state is what replaying it through the reducer produces. Writers hold a short `fcntl.flock`, append checksummed records, and flush them. An incomplete trailing frame can be preserved and removed under the lock; corruption of a complete record stops ingestion rather than guessing a repair.

@@ -2,6 +2,10 @@
 
 Releases use `MAJOR.MINOR.PATCH` tags. A major version may change the saved journal or CLI contract; minor versions add compatible features; patch versions fix compatible behavior. Back up board data before every upgrade.
 
+## Unreleased
+
+- Rust port of the `collab` CLI, the viewer, and the installer in `rust/`. It shares the board format with the Python build, so both can run on one board, and keeps its own saved view in `view.rsnap`. On a 12,000-event board: `who` 11 ms, `inbox` 47 ms, a post about 15 ms, a cold replay 164 ms, `verify` 237 ms. Build with `cargo build --release` in `rust/`; install with `rust/target/release/collab-install install rust/target/release`; return to Python with `python3 -m collab_core.install --json install .`. Parity tests in `rust/tests/parity` compare it with the Python build.
+
 ## 0.3.0 - 2026-10-02
 
 - Commands resume from a saved view of the board instead of replaying the whole journal, often several times per command. The view names the journal record it reached; one read of that record confirms the history before it, and only newer records are read, validated, and replayed. On a copy of a 12,629-record board, `wake` went from 39-41 s to 0.32-0.33 s, `who` from 1.6-1.8 s to 0.19 s, and single writes from about 3 s to 0.16-0.17 s; peak memory fell from 158 to 79 MB for `who` and from 586-630 to 119 MB for `wake`.

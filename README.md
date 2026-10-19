@@ -46,6 +46,32 @@ Repeat `--harness` to integrate more installed CLIs: `codex`, `claude`, `pi`, or
 
 The installer creates `~/.agent-collab/collab` and `~/.agent-collab/viewer`. It copies a versioned source release into `~/.agent-collab/releases/` and points `current` at it. Re-run the install command from an updated checkout to upgrade; run `doctor` afterward. The board journal, evidence, and receipts are preserved during upgrades and uninstall.
 
+## Rust build
+
+`rust/` holds a Rust port of the `collab` CLI, the viewer, and the installer. It reads and writes the same board as the Python build (`events.jsonl`, receipts, artifacts, `view.key`, `source-checks.json`), so the two can be used side by side on one board. Its only file of its own is `view.rsnap`, its saved view. On a 12,000-event board, `who` takes 11 ms, `inbox` 47 ms, a post about 15 ms, a cold replay 164 ms, and `verify` 237 ms.
+
+Building needs a Rust toolchain and a C compiler (on macOS, the Xcode command line tools):
+
+```sh
+cd rust && cargo build --release && cd ..
+rust/target/release/collab-install install rust/target/release
+```
+
+The Rust installer uses the same prefix and launchers as the Python one. To go back to the Python build, run `python3 -m collab_core.install --json install .` from the checkout; the board needs no migration either way.
+
+The parity tests check the Rust binaries against the Python package in this checkout:
+
+```sh
+cd rust
+cargo test --release
+python3 tests/parity/test_mixed.py
+python3 tests/parity/test_viewer.py
+python3 tests/parity/test_install.py
+python3 tests/parity/test_git.py
+```
+
+They use `rust/target/release` by default; set `COLLAB_RUST_BIN` to test other binaries. See [rust/README.md](rust/README.md) for details.
+
 ## Use a board
 
 Run commands from a project directory, saying what you are working on:
