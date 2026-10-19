@@ -1,20 +1,35 @@
 """Durable receipts, deterministic replay, artifacts, and bounded board reads."""
 from __future__ import annotations
+import contextlib
 import copy
 import base64
 import binascii
 import datetime as dt
+import gc
 import hashlib
+import hmac
 import json
+import marshal
 import os
 from pathlib import Path
+import re
+import secrets
 import tempfile
+import threading
 import uuid
 
-from .journal import Journal, JournalError, JournalBusy, JournalCorrupt
+from .journal import Journal, JournalError, JournalBusy, JournalCorrupt, Position
 from . import presence, state as model
 
-REDUCER_VERSION = 1
+# The code that derives state: the reducer and the replay below. A saved view
+# counts only for the exact source that produced it, so editing either file
+# retires every saved view without anyone having to bump a version number.
+REDUCER = hashlib.sha256(Path(model.__file__).read_bytes() + Path(__file__).read_bytes()).hexdigest()
+VIEW_FORMAT = 2
+# A command that had to replay this many records saves its view for the next
+# ones. That keeps any command's replay to a few tens of milliseconds, while
+# saves, which rewrite the whole view, stay at a few per busy day.
+SAVE_AFTER = 256
 
 def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False, allow_nan=False).encode('utf-8')
@@ -106,6 +121,72 @@ def render_item(kind, item, view='compact', preview_limit=COMPACT_PREVIEW_LIMIT)
         }
     raise model.Rejected('invalid delivery item kind')
 
+@contextlib.contextmanager
+def _acyclic():
+    """Pause the cycle collector while building board data, which holds no cycles.
+
+    Loading a view allocates hundreds of thousands of containers, and each
+    collection pass over them would find nothing to free.
+    """
+    paused = gc.isenabled(); gc.disable()
+    try:
+        yield
+    finally:
+        if paused:
+            gc.enable()
+
+def clone(value):
+    """An exact, independent copy of plain JSON data, about twice as fast as deepcopy."""
+    return marshal.loads(marshal.dumps(value))
+
+def _outcome(env):
+    event = env['payload']
+    return {'status': 'accepted' if event['accepted'] else 'rejected',
+            'request_id': event['request']['id'], 'seq': env['seq'], **event['result']}
+
+
+class View:
+    """The board replayed up to one journal position.
+
+    `state` is the reducer state. `requests` maps each recorded request ID to
+    where its record sits, [seq, start, end], so its content and outcome are
+    read back from the journal itself. A view moves forward only by replaying
+    committed records onto it, so it always equals a replay from record 1.
+    `shared` marks a state handed to a reader: the board copies it before
+    replaying more records, so a reader's state never changes under it.
+    """
+
+    def __init__(self, position=None, state=None, requests=None):
+        self.position = position
+        self.state = model.empty() if state is None else state
+        self.requests = {} if requests is None else requests
+        self.shared = False
+
+    def replay(self, records, positions):
+        """Apply committed records in order; each must reproduce its recorded result."""
+        if records and self.shared:
+            self.state, self.shared = clone(self.state), False
+        for env, where in zip(records, positions):
+            event = env['payload']
+            if event.get('version') != 1:
+                raise JournalCorrupt('unsupported board event version')
+            req = event['request']
+            if req['id'] in self.requests:
+                raise JournalCorrupt('duplicate canonical request ID')
+            if event['accepted']:
+                try:
+                    self.state, result = model.apply(self.state, req, event['recorded_at'], copy_state=False)
+                except (model.Rejected, KeyError, TypeError) as exc:
+                    raise JournalCorrupt(f'accepted event cannot replay: {exc}') from exc
+                if result != event['result']:
+                    raise JournalCorrupt('reducer result differs from recorded result')
+            else:
+                model.record_rejection(self.state, req, event['result']['error'], event['recorded_at'])
+            self.requests[req['id']] = [where.seq, where.start, where.end]
+        if positions:
+            self.position = positions[-1]
+
+
 def durable_directory(path):
     fd = os.open(path, os.O_RDONLY)
     try:
@@ -131,6 +212,11 @@ class Board:
         self.timeout = timeout
         self.journal = Journal(self.root / 'events.jsonl', timeout=timeout)
         self.cache_path = self.root / 'view.json'
+        self.key_path = self.root / 'view.key'
+        self.checks_path = self.root / 'source-checks.json'
+        self.save_after = SAVE_AFTER
+        self._view = None
+        self._mutex = threading.RLock()
 
     def capture(self, source):
         path = Path(source).expanduser().resolve(strict=True)
@@ -194,8 +280,8 @@ class Board:
         # Keep deletion under the canonical lock. Planned removal rejects new
         # evidence references until completion; crashed deletion remains visible.
         try:
-            with self.journal.locked() as log:
-                state, _ = self._load(log.records)
+            with self._current() as (_, view):
+                state = view.state
                 removal = model.entity(state, 'artifact_removals', removal_id)
                 model.entity(state, 'sessions', actor)
                 model.require(model.may_manage(state, actor, removal['actor']) or state['sessions'][actor]['harness'] == 'human', 'only responsible agent or user can resume removal')
@@ -230,69 +316,159 @@ class Board:
                 except (OSError, ValueError, KeyError, JournalCorrupt) as exc:
                     raise model.Rejected(f'evidence unavailable: {exc}') from exc
 
-    def _load(self, records):
-        # Materialized JSON is an inspectable export, never an authority.
-        # Replaying committed records is deliberately the only source of state.
-        state = model.empty(); requests = {}
-        for env in records:
-            event = env['payload']
-            if event.get('version') != 1:
-                raise JournalCorrupt('unsupported board event version')
-            req = event['request']; request_hash = digest(canonical(req))
-            if req['id'] in requests:
-                raise JournalCorrupt('duplicate canonical request ID')
-            if event['accepted']:
-                try:
-                    state, result = model.apply(state, req, event['recorded_at'], copy_state=False)
-                except (model.Rejected, KeyError, TypeError) as exc:
-                    raise JournalCorrupt(f'accepted event cannot replay: {exc}') from exc
-                if result != event['result']:
-                    raise JournalCorrupt('reducer result differs from recorded result')
-            else:
-                model.record_rejection(state, req, event['result']['error'], event['recorded_at'])
-            requests[req['id']] = {'hash': request_hash, 'outcome': self._outcome(env)}
-        return state, requests
+    @contextlib.contextmanager
+    def _current(self):
+        """Lock the journal and yield it with this board's view at its head.
 
-    def _save_cache(self, records, state, requests):
-        value = {'version': REDUCER_VERSION, 'count': len(records),
-                 'head': records[-1]['sha256'] if records else None,
-                 'stream': records[0]['stream'] if records else None,
-                 'state': state, 'requests': requests}
-        value['sha256'] = digest(canonical(value))
+        The view resumes from this process's last one, else from view.json,
+        else from a replay of the committed records read before locking, so a
+        full replay never holds up other writers. Under the lock the journal
+        confirms the view's position with one read and hands over only the
+        records after it; if it cannot, everything replays from record 1. A
+        view that needed a long replay is saved for later commands once the
+        lock is released.
+        """
+        with self._mutex:
+            replayed = 0
+            with _acyclic():
+                view = self._view or self._saved_view()
+                if view is None:
+                    view = View(); records, positions = self.journal.committed()
+                    view.replay(records, positions); replayed = len(records)
+            try:
+                with self.journal.locked(after=view.position) as log:
+                    if log.base != view.position:
+                        view, replayed = View(), 0
+                    replayed += len(log.records)
+                    with _acyclic():
+                        view.replay(log.records, log.positions)
+                    self._view = view
+                    yield log, view
+            except BaseException:
+                self._view = None  # it may be half-advanced; the next call reloads it
+                raise
+            if replayed >= self.save_after and view.position:
+                self._save_view(view)
+
+    def _view_key(self, create=False):
+        """The secret that makes view.json something only this board's replay writes."""
         try:
-            atomic_file(self.cache_path, canonical(value) + b'\n')
+            key = self.key_path.read_bytes()
         except OSError:
-            # The authoritative event is already durable. Cache failure cannot undo it.
-            # A later read reconstructs from the valid log prefix.
+            key = b''
+        if re.fullmatch(rb'[0-9a-f]{64}', key):
+            return key
+        if not create:
+            return None
+        # Two first saves that race may each install a key. A view signed with
+        # the replaced one then fails its check once, which costs one replay.
+        atomic_file(self.key_path, secrets.token_hex(32).encode())
+        return self._view_key()
+
+    def _saved_view(self):
+        """The view saved in view.json, or None unless it is one this code wrote.
+
+        The file must be in this format, from this exact reducer source, and
+        carry a MAC under view.key over everything else in it. Its position is
+        then checked against the journal under the lock. A damaged, edited,
+        foreign or outdated file is ignored, and the journal replays instead.
+        """
+        key = self._view_key()
+        if key is None:
+            return None
+        try:
+            with open(self.cache_path, 'rb') as stream:
+                head = stream.readline(4096); body = stream.read()
+            header = json.loads(head)
+            mac = header.pop('mac')
+            check = hmac.new(key, canonical(header), 'sha256'); check.update(body)
+            if not (isinstance(mac, str) and hmac.compare_digest(mac, check.hexdigest())):
+                return None
+            if header['format'] != VIEW_FORMAT or header['reducer'] != REDUCER:
+                return None
+            state, requests = (json.loads(line) for line in body.splitlines())
+            return View(Position(**header['position']), state, requests)
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return None
+
+    def _save_view(self, view):
+        """Save `view` to view.json; a failure only makes later commands replay more."""
+        try:
+            key = self._view_key(create=True)
+            header = {'format': VIEW_FORMAT, 'reducer': REDUCER, 'position': view.position._asdict()}
+            body = canonical(view.state) + b'\n' + canonical(view.requests) + b'\n'
+            check = hmac.new(key, canonical(header), 'sha256'); check.update(body)
+            atomic_file(self.cache_path, canonical({**header, 'mac': check.hexdigest()}) + b'\n' + body)
+        except (OSError, TypeError):
             return False
         return True
 
-    @staticmethod
-    def _outcome(env):
-        event = env['payload']
-        return {'status': 'accepted' if event['accepted'] else 'rejected',
-                'request_id': event['request']['id'], 'seq': env['seq'], **event['result']}
-
     def read_state(self):
-        with self.journal.locked() as log:
-            state, requests = self._load(log.records)
-            self._save_cache(log.records, state, requests)
-            return state
+        """The current state, shared rather than copied: read it, do not modify it.
+
+        The board never changes a state it has handed out, so it stays a
+        consistent snapshot while the board moves on.
+        """
+        with self._current() as (_, view):
+            view.shared = True
+            return view.state
+
+    def read_history(self):
+        """The current state and every committed record, read under one lock."""
+        with self._current() as (log, view):
+            view.shared = True
+            return view.state, log.history()
+
+    def verify(self):
+        """Replay every record from the start and compare with the incremental view.
+
+        Commands trust the checksum at their view's position and replay only
+        what follows. This rereads and validates every record, so it also finds
+        damage inside that prefix. A view that differs is replaced.
+        """
+        with self._mutex:
+            with self.journal.locked() as log, _acyclic():
+                full = View(); full.replay(log.records, log.positions)
+                view = self._view or self._saved_view()
+                at = view.position.seq if view and view.position else 0
+                if view is None or (at and (at > len(log.positions) or log.positions[at - 1] != view.position)):
+                    view, at = View(), 0
+                view.replay(log.records[at:], log.positions[at:])
+            expected = digest(canonical([full.state, full.requests]))
+            found = digest(canonical([view.state, view.requests]))
+            self._view = full
+            if found != expected:
+                self._save_view(full)
+        head = full.position._asdict() if full.position else None
+        return {'status': 'accepted' if found == expected else 'rejected', 'records': head['seq'] if head else 0,
+                'head': head, 'replay_sha256': expected, 'view_sha256': found, 'match': found == expected}
 
     def request(self, actor, op, data, request_id=None):
         return {'id': request_id or str(uuid.uuid4()), 'actor': actor, 'op': op,
                 'data': data, 'observed_at': utcnow()}
 
+    @staticmethod
+    def _recorded(log, view, req, sha):
+        """The outcome already recorded for this request ID, read back from its record."""
+        where = view.requests.get(req['id'])
+        if where is None:
+            return None
+        env = log.record_at(*where)
+        recorded = env['payload']['request']
+        if recorded['id'] != req['id']:
+            raise JournalCorrupt('request index points at another record')
+        if digest(canonical(recorded)) != sha:
+            raise model.Rejected('request ID reused with different content')
+        return _outcome(env)
+
     def _ingest(self, req):
+        sha = digest(canonical(req))
         # Resolve committed requests before touching external evidence, then
         # recheck after validation to handle concurrent identical submissions.
-        with self.journal.locked() as log:
-            _, requests = self._load(log.records)
-            previous = requests.get(req['id'])
-            if previous is not None:
-                if previous['hash'] != digest(canonical(req)):
-                    raise model.Rejected('request ID reused with different content')
-                return previous['outcome']
+        with self._current() as (log, view):
+            previous = self._recorded(log, view, req, sha)
+        if previous is not None:
+            return previous
         # Inspect external evidence outside the board lock. This observation is
         # relevant only to new requests, never to a previously recorded outcome.
         evidence_error = None
@@ -301,14 +477,10 @@ class Board:
             self._validate_evidence(req)
         except model.Rejected as exc:
             evidence_error = str(exc)
-        with self.journal.locked() as log:
-            state, requests = self._load(log.records)
-            sha = digest(canonical(req))
-            if req['id'] in requests:
-                previous = requests[req['id']]
-                if previous['hash'] != sha:
-                    raise model.Rejected('request ID reused with different content')
-                return previous['outcome']
+        with self._current() as (log, view):
+            previous = self._recorded(log, view, req, sha)
+            if previous is not None:
+                return previous
             recorded_at = utcnow()
             try:
                 if evidence_error is not None:
@@ -325,29 +497,25 @@ class Board:
                         except (OSError, ValueError, JournalCorrupt) as exc:
                             raise model.Rejected('preserved evidence unavailable: ' + str(exc)) from exc
                 if req['op'] == 'artifact.remove.finish':
-                    removal = model.entity(state, 'artifact_removals', req['data'].get('removal'))
+                    removal = model.entity(view.state, 'artifact_removals', req['data'].get('removal'))
                     model.require(not (self.root / 'artifacts' / removal['sha256']).exists(), 'artifact still exists; resume physical removal first')
                 if req['op'] == 'artifact.remove.plan':
-                    preview = self._cleanup_preview(req['data']['sha256'], log.records)
+                    preview = self._cleanup_preview(req['data']['sha256'], log.history())
                     model.require(not preview['pending_receipts'], 'reconcile pending artifact receipts before cleanup')
                     compact = {key:value for key,value in preview.items() if key not in ('references', 'pending_receipts')}
                     model.require(preview['token'] == req['data'].get('token') and compact == req['data'].get('preview'), 'cleanup preview changed; request a new preview')
-                new_state, result = model.apply(state, req, recorded_at)
+                new_state, result = model.apply(clone(view.state), req, recorded_at, copy_state=False)
                 accepted = True
             except model.Rejected as exc:
-                new_state = copy.deepcopy(state); result = {'error': str(exc)}; accepted = False
+                new_state = clone(view.state); result = {'error': str(exc)}; accepted = False
                 model.record_rejection(new_state, req, str(exc), recorded_at)
             event = {'version': 1, 'request': req, 'recorded_at': recorded_at,
                      'accepted': accepted, 'result': result}
             env = log.append(event)
-            outcome = self._outcome(env)
-            requests[req['id']] = {'hash': sha, 'outcome': outcome}
-            # LockedJournal.append includes the event in records by contract.
-            records = log.records if log.records and log.records[-1]['sha256'] == env['sha256'] else log.records + [env]
-            cached = self._save_cache(records, new_state, requests)
-            if not cached:
-                outcome = {**outcome, 'warning': 'Derived cache could not be saved; history is durable.'}
-            return outcome
+            view.state, view.shared = new_state, False
+            view.requests[req['id']] = [log.head.seq, log.head.start, log.head.end]
+            view.position = log.head
+            return _outcome(env)
 
     def _receipt_journal(self, actor):
         model.identifier(actor)
@@ -406,10 +574,18 @@ class Board:
         return outcomes
 
     def check_sources(self, actor, project, limit=8):
-        """Rotate a bounded, model-free freshness check at active checkpoints."""
+        """Rotate a bounded, model-free freshness check at active checkpoints.
+
+        Only a source that changed or vanished becomes a post.observe record. A
+        check that finds every source as recorded changes nothing on the board,
+        so it is not journaled. When each post was last looked at is local
+        scheduling, kept in source-checks.json; losing that file only restarts
+        the rotation.
+        """
         model.require(type(limit) is int and 1 <= limit <= 32, 'source scan limit must be 1..32')
         state = self.read_state(); model.entity(state, 'sessions', actor)
         roots = model.entity(state, 'projects', project)['roots']
+        looked = self._source_checks()
         candidates = []
         for post in state['posts'].values():
             if post['project'] != project or post['due']:
@@ -418,12 +594,25 @@ class Board:
             paths = sorted({ref['source'] for ref in proofs})
             paths = [path for path in paths if any(Path(path).resolve().is_relative_to(Path(root).resolve()) for root in roots)]
             if paths:
-                candidates.append((post, paths))
-        candidates.sort(key=lambda item: (item[0].get('source_checked_at', ''), item[0]['created_at'], item[0]['id']))
+                known = {**{ref['source']: ref['sha256'] for ref in proofs}, **post.get('source_observations', {})}
+                candidates.append((post, paths, known))
+        candidates.sort(key=lambda item: (max(looked.get(item[0]['id'], ''), item[0].get('source_checked_at', '')),
+                                          item[0]['created_at'], item[0]['id']))
         checked = 0; changed = 0; outcomes = []
-        for post, paths in candidates[:limit]:
-            observations = {}; proofs = []
+        for post, paths, known in candidates[:limit]:
+            observations = {}
             for path in paths[:32]:
+                try:
+                    source = Path(path)
+                    observations[path] = digest(source.read_bytes()) if source.is_file() else None
+                except OSError:
+                    observations[path] = None
+            if all(known.get(path) == sha for path, sha in observations.items()):
+                # Hashing the source is the whole check: its recorded artifact is not reread.
+                looked[post['id']] = utcnow(); checked += 1
+                continue
+            proofs = []
+            for path in observations:
                 try:
                     proof = self.capture(path)
                     observations[path] = proof['sha256']; proofs.append(proof)
@@ -434,8 +623,23 @@ class Board:
                 'observations':observations, 'evidence':proofs}))
             outcomes.append(outcome)
             if outcome['status'] == 'accepted':
-                checked += 1; changed += int(outcome['changed'])
+                looked[post['id']] = utcnow(); checked += 1; changed += int(outcome['changed'])
+        if candidates:
+            self._save_source_checks({pid: at for pid, at in looked.items() if pid in state['posts']})
         return {'checked':checked, 'changed':changed, 'outcomes':outcomes}
+
+    def _source_checks(self):
+        try:
+            value = json.loads(self.checks_path.read_bytes())
+        except (OSError, ValueError):
+            return {}
+        return {pid: at for pid, at in value.items() if isinstance(at, str)} if isinstance(value, dict) else {}
+
+    def _save_source_checks(self, looked):
+        try:
+            atomic_file(self.checks_path, canonical(looked) + b'\n')
+        except OSError:
+            pass  # the rotation restarts; nothing on the board depends on it
 
     def due(self, project=None, limit=4, force=False):
         s = self.read_state(); now = model.timestamp(utcnow())
@@ -466,9 +670,9 @@ class Board:
         reconciliation = self.sync(actor)
         s = self.read_state(); session = model.entity(s, 'sessions', actor)
         project = project or session['project']; model.entity(s, 'projects', project)
-        self.check_sources(actor, project)
-        s = self.read_state()
-        seen = {(i['kind'], i['id'], i['revision']) for d in s['deliveries'].values() if d['actor'] == actor and d['acked'] for i in d['items']}
+        if self.check_sources(actor, project)['outcomes']:
+            s = self.read_state()
+        seen ={(i['kind'], i['id'], i['revision']) for d in s['deliveries'].values() if d['actor'] == actor and d['acked'] for i in d['items']}
         items = []
         if item_id is not None:
             model.require(item_kind in (None, 'post', 'task', 'notice'), 'invalid item kind')

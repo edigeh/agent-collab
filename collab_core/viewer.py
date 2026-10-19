@@ -17,25 +17,24 @@ ASSETS = Path(__file__).with_name('web')
 def snapshot(board, view='full'):
     if view not in BRIEF_VIEWS:
         raise ValueError('view must be compact or full')
-    # Use the canonical journal and reducer, never trust the disposable view export.
-    with board.journal.locked() as log:
-        state, _ = board._load(log.records)
-        history = {}
-        for record in log.records:
-            event = record['payload']
-            if not event['accepted']:
-                continue
-            req = event['request']; data = req['data']
-            targets = [req['id']] if req['op'] == 'post.create' else []
-            if req['op'].startswith('post.') and data.get('post'):
-                targets.append(data['post'])
-            if req['op'] == 'moderation.apply':
-                targets += [o['post'] for o in data.get('outcomes', [])]
-            for target in targets:
-                detail = next((o for o in data.get('outcomes', []) if o['post'] == target), data)
-                history.setdefault(target, []).append({'operation': req['op'], 'actor': req['actor'],
-                    'at': event['recorded_at'], 'detail': detail})
-        sequence = log.records[-1]['seq'] if log.records else 0
+    # State and history come from one lock over the canonical journal.
+    state, records = board.read_history()
+    history = {}
+    for record in records:
+        event = record['payload']
+        if not event['accepted']:
+            continue
+        req = event['request']; data = req['data']
+        targets = [req['id']] if req['op'] == 'post.create' else []
+        if req['op'].startswith('post.') and data.get('post'):
+            targets.append(data['post'])
+        if req['op'] == 'moderation.apply':
+            targets += [o['post'] for o in data.get('outcomes', [])]
+        for target in targets:
+            detail = next((o for o in data.get('outcomes', []) if o['post'] == target), data)
+            history.setdefault(target, []).append({'operation': req['op'], 'actor': req['actor'],
+                'at': event['recorded_at'], 'detail': detail})
+    sequence = records[-1]['seq'] if records else 0
     # The process check runs after the lock is released so writers never wait on ps.
     agents = presence.everyone(state, timestamp(utcnow()))
     if view == 'compact':

@@ -15,7 +15,7 @@ import stat
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, NamedTuple
 
 
 _ZERO_HASH = "0" * 64
@@ -37,6 +37,21 @@ class JournalCorrupt(JournalError):
 
 class _DuplicateKey(ValueError):
     pass
+
+
+class Position(NamedTuple):
+    """Where one committed record sits: its stream, sequence, checksum and bytes.
+
+    A record's checksum covers its `prev` hash, so it commits to every record
+    before it. A position whose record still verifies therefore identifies the
+    whole prefix it ends, and checking that costs one read of one record.
+    """
+
+    stream: str
+    seq: int
+    sha256: str
+    start: int
+    end: int
 
 
 def _pairs_without_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -166,24 +181,57 @@ def _write_all(fd: int, data: bytes) -> None:
 
 
 class LockedJournal:
-    """A validated journal snapshot held under the journal's exclusive lock."""
+    """A validated journal held under the journal's exclusive lock.
+
+    `records` holds the committed records after `base`, or every record when
+    `base` is None, followed by any appended in this lock; `positions` says
+    where each of them sits. `head` is the position of the last record.
+    """
 
     def __init__(
         self,
         *,
-        path: Path,
+        journal: Journal,
         fd: int,
         records: list[dict[str, Any]],
-        max_record: int,
+        positions: list[Position],
+        base: Position | None,
     ) -> None:
-        self.path = path
+        self.path = journal.path
         self.records = records
+        self.positions = positions
+        self.base = base
+        self.head = positions[-1] if positions else base
+        self._journal = journal
         self._fd = fd
-        self._max_record = max_record
+        self._max_record = journal.max_record
         self._closed = False
-        self._stream = records[0]["stream"] if records else None
-        self._last_sequence = records[-1]["seq"] if records else 0
-        self._previous_hash = records[-1]["sha256"] if records else _ZERO_HASH
+
+    def history(self) -> list[dict[str, Any]]:
+        """Every committed record, reading and validating the prefix before `base`."""
+        if self._closed:
+            raise JournalError("locked journal is no longer active")
+        if self.base is None:
+            return list(self.records)
+        prefix, positions, _ = self._journal._read_and_validate(self._fd, None, stop=self.base.end)
+        if not positions or positions[-1] != self.base:
+            raise JournalCorrupt("journal prefix does not end at its verified position")
+        return prefix + self.records
+
+    def record_at(self, seq: int, start: int, end: int) -> dict[str, Any]:
+        """Committed record `seq`, read from bytes [start, end) and validated on its own."""
+        if self._closed:
+            raise JournalError("locked journal is no longer active")
+        line = os.pread(self._fd, end - start, start) if 0 <= start < end else b""
+        if len(line) != end - start or not line.endswith(b"\n"):
+            raise JournalCorrupt(f"record {seq} is not at bytes {start}..{end}")
+        return self._journal._validate_record(
+            line[:-1],
+            expected_sequence=seq,
+            expected_stream=self.head.stream if self.head else None,
+            expected_previous=None,
+            offset=start,
+        )
 
     def append(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Durably append one payload and return its checksummed envelope."""
@@ -195,9 +243,9 @@ class LockedJournal:
 
         # Round-trip the payload so caller mutations cannot alter the validated snapshot.
         payload_copy = _loads_for_append(_canonical(payload))
-        stream = self._stream or str(uuid.uuid4())
-        sequence = self._last_sequence + 1
-        previous = self._previous_hash
+        stream = self.head.stream if self.head else str(uuid.uuid4())
+        sequence = self.head.seq + 1 if self.head else 1
+        previous = self.head.sha256 if self.head else _ZERO_HASH
 
         envelope: dict[str, Any] = {
             "version": 1,
@@ -213,6 +261,7 @@ class LockedJournal:
                 f"encoded journal record is {len(encoded)} bytes; maximum is {self._max_record}"
             )
         try:
+            start = os.fstat(self._fd).st_size
             _write_all(self._fd, encoded + b"\n")
             os.fsync(self._fd)
         except OSError as exc:
@@ -220,9 +269,8 @@ class LockedJournal:
 
         stored = copy.deepcopy(envelope)
         self.records.append(stored)
-        self._stream = stream
-        self._last_sequence = sequence
-        self._previous_hash = stored["sha256"]
+        self.head = Position(stream, sequence, stored["sha256"], start, start + len(encoded) + 1)
+        self.positions.append(self.head)
         return copy.deepcopy(stored)
 
 
@@ -253,8 +301,14 @@ class Journal:
         self.lock_path = self.path.with_name(self.path.name + ".lock")
 
     @contextlib.contextmanager
-    def locked(self) -> Iterator[LockedJournal]:
-        """Lock, validate, and expose the journal until the context exits."""
+    def locked(self, after: Position | None = None) -> Iterator[LockedJournal]:
+        """Lock, validate, and expose the journal until the context exits.
+
+        With `after`, a position this journal reported earlier, one read checks
+        that its record is unchanged, and only the records past it are read and
+        validated. Otherwise, or when that record changed, every record is read
+        and `base` is None, so the caller starts again from the beginning.
+        """
         lock_fd: int | None = None
         journal_fd: int | None = None
         locked_journal: LockedJournal | None = None
@@ -265,14 +319,16 @@ class Journal:
             self._acquire(lock_fd)
             acquired = True
             journal_fd, _ = _open_private_regular(self.path, os.O_RDWR | os.O_APPEND)
-            records, incomplete_at = self._read_and_validate(journal_fd)
+            base = after if after is not None and self._holds(journal_fd, after) else None
+            records, positions, incomplete_at = self._read_and_validate(journal_fd, base)
             if incomplete_at is not None:
                 self._recover_tail(journal_fd, incomplete_at)
             locked_journal = LockedJournal(
-                path=self.path,
+                journal=self,
                 fd=journal_fd,
                 records=records,
-                max_record=self.max_record,
+                positions=positions,
+                base=base,
             )
             yield locked_journal
         except (JournalError, JournalCorrupt, JournalBusy):
@@ -292,6 +348,31 @@ class Journal:
                         pass
                 os.close(lock_fd)
 
+    def committed(self) -> tuple[list[dict[str, Any]], list[Position]]:
+        """Every committed record and its position, read without taking the lock.
+
+        Writers only append, and a record is committed once its closing newline
+        is written, so an unlocked read sees a consistent prefix. An unfinished
+        trailing record is left for a locked reader to recover; damage to a
+        complete record raises, as it does under the lock.
+        """
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(self.path, flags)
+        except FileNotFoundError:
+            return [], []
+        except OSError as exc:
+            raise JournalError(f"journal operation failed: {exc}") from exc
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise JournalError(f"journal path is not a regular file: {self.path}")
+            records, positions, _ = self._read_and_validate(fd, None)
+            return records, positions
+        except OSError as exc:
+            raise JournalError(f"journal operation failed: {exc}") from exc
+        finally:
+            os.close(fd)
+
     def _acquire(self, lock_fd: int) -> None:
         deadline = time.monotonic() + self.timeout
         while True:
@@ -306,12 +387,43 @@ class Journal:
                     raise JournalBusy(f"journal remained locked for {self.timeout:.3f} seconds")
                 time.sleep(min(0.01, remaining))
 
-    def _read_and_validate(self, fd: int) -> tuple[list[dict[str, Any]], int | None]:
-        size = os.fstat(fd).st_size
+    def _holds(self, fd: int, position: Position) -> bool:
+        """Whether the record at `position` is still the one reported there."""
+        if not isinstance(position, Position):
+            return False
+        length = position.end - position.start
+        if not 0 <= position.start < position.end <= os.fstat(fd).st_size or length > self.max_record + 1:
+            return False
+        line = os.pread(fd, length, position.start)
+        if len(line) != length or not line.endswith(b"\n"):
+            return False
+        try:
+            record = self._validate_record(
+                line[:-1],
+                expected_sequence=position.seq,
+                expected_stream=position.stream,
+                expected_previous=None,
+                offset=position.start,
+            )
+        except JournalCorrupt:
+            return False
+        return record["sha256"] == position.sha256
+
+    def _read_and_validate(
+        self, fd: int, base: Position | None, stop: int | None = None
+    ) -> tuple[list[dict[str, Any]], list[Position], int | None]:
+        """Validate the records after `base` (or all) up to `stop` (or the end).
+
+        Returns the records, where each one sits, and the offset of an
+        incomplete trailing frame if one was found.
+        """
+        size = os.fstat(fd).st_size if stop is None else stop
         records: list[dict[str, Any]] = []
-        offset = 0
-        expected_stream: str | None = None
-        expected_previous = _ZERO_HASH
+        positions: list[Position] = []
+        offset = base.end if base else 0
+        expected_stream: str | None = base.stream if base else None
+        expected_previous = base.sha256 if base else _ZERO_HASH
+        first_sequence = base.seq + 1 if base else 1
 
         reader_fd = os.dup(fd)
         try:
@@ -327,7 +439,7 @@ class Journal:
                             )
                         record = self._validate_record(
                             raw,
-                            expected_sequence=len(records) + 1,
+                            expected_sequence=first_sequence + len(records),
                             expected_stream=expected_stream,
                             expected_previous=expected_previous,
                             offset=offset,
@@ -335,6 +447,7 @@ class Journal:
                         records.append(record)
                         expected_stream = record["stream"]
                         expected_previous = record["sha256"]
+                        positions.append(Position(record["stream"], record["seq"], record["sha256"], offset, offset + len(line)))
                         offset += len(line)
                         continue
 
@@ -350,11 +463,11 @@ class Journal:
                                 f"committed record at byte {offset} exceeds {self.max_record} bytes"
                             )
                         scan_at += len(chunk)
-                    return records, offset
+                    return records, positions, offset
         finally:
             # fdopen closes reader_fd on normal and exceptional paths after entry.
             pass
-        return records, None
+        return records, positions, None
 
     def _validate_record(
         self,
@@ -362,7 +475,7 @@ class Journal:
         *,
         expected_sequence: int,
         expected_stream: str | None,
-        expected_previous: str,
+        expected_previous: str | None,
         offset: int,
     ) -> dict[str, Any]:
         try:
@@ -387,7 +500,7 @@ class Journal:
                 )
             if type(record["prev"]) is not str or not _HASH_RE.fullmatch(record["prev"]):
                 raise JournalCorrupt("record previous hash is malformed")
-            if record["prev"] != expected_previous:
+            if expected_previous is not None and record["prev"] != expected_previous:
                 raise JournalCorrupt("record previous hash does not match committed history")
             if type(record["payload"]) is not dict:
                 raise JournalCorrupt("record payload must be a JSON object")
@@ -432,4 +545,4 @@ class Journal:
         os.fsync(fd)
 
 
-__all__ = ["Journal", "JournalBusy", "JournalCorrupt", "JournalError", "LockedJournal"]
+__all__ = ["Journal", "JournalBusy", "JournalCorrupt", "JournalError", "LockedJournal", "Position"]

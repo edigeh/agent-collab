@@ -8,7 +8,7 @@ import sys
 
 FORBIDDEN_DIRECTORIES = {b"work", b".agent-collab", b".agent-collab-receipts",
                          b"artifacts", b"runs", b"backups"}
-FORBIDDEN_FILES = {b"events.jsonl", b"view.json", b".DS_Store"}
+FORBIDDEN_FILES = {b"events.jsonl", b"view.json", b"view.key", b"source-checks.json", b".DS_Store"}
 CONTENT_PATTERNS = {
     "home path": re.compile(rb"/(?:Users|home)/[A-Za-z0-9._-]+/"),
     "private key": re.compile(rb"-----BEGIN [A-Z ]*PRIVATE KEY-----"),

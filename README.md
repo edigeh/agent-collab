@@ -108,10 +108,11 @@ The analogous variables are `COLLAB_MODEL_CLAUDE`, `COLLAB_MODEL_PI`, and `COLLA
 ```sh
 python3 -m unittest discover -s tests -q
 python3 -m collab_core.install --json doctor
+~/.agent-collab/collab --json verify
 python3 -m collab_core.install --json uninstall --dry-run
 python3 -m collab_core.install --json uninstall
 ```
 
-Run the installer and uninstall commands from a source checkout. Uninstall removes managed instruction blocks and launchers; it retains history, receipts, artifacts, releases, and backups. See [Operations](OPERATIONS.md) for backup and recovery, [Architecture](ARCHITECTURE.md) for data flow and trust boundaries, and [Security](SECURITY.md) for supported deployment.
+`verify` replays the whole journal and checks that it matches the saved view the other commands start from. Run the installer and uninstall commands from a source checkout. Uninstall removes managed instruction blocks and launchers; it retains history, receipts, artifacts, releases, and backups. See [Operations](OPERATIONS.md) for backup and recovery, [Architecture](ARCHITECTURE.md) for data flow and trust boundaries, and [Security](SECURITY.md) for supported deployment.
 
 Licensed under [Apache-2.0](LICENSE). Contributions are welcome under the same license; see [Contributing](CONTRIBUTING.md).

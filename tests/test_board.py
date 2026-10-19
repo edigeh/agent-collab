@@ -1,4 +1,3 @@
-import copy
 import json
 from pathlib import Path
 import tempfile
@@ -20,6 +19,10 @@ class BoardTest(unittest.TestCase):
         result = self.board.submit(self.board.request(actor, op, data, f'r{self.counter}'))
         self.assertEqual(result['status'], 'accepted', result)
         return result
+    def rebuilt(self):
+        """The state a new process derives with no saved view: a replay from record 1."""
+        self.board.cache_path.unlink(missing_ok=True)
+        return Board(self.path / 'board').read_state()
     def proof(self, text='Observed result'):
         path = self.path / f'evidence-{self.counter}.txt'; path.write_text(text)
         return self.board.capture(path)
@@ -27,8 +30,7 @@ class BoardTest(unittest.TestCase):
         req = self.board.request('a', 'post.create', {'project':'p', 'text':'hello'}, 'same')
         first = self.board.submit(req); again = self.board.submit(req)
         self.assertEqual(first, again)
-        before = self.board.read_state(); self.board.cache_path.unlink()
-        self.assertEqual(self.board.read_state(), before)
+        self.assertEqual(self.rebuilt(), self.board.read_state())
         self.assertEqual(self.board.sync('a'), [])
     def test_conflicting_claim_is_durable_rejection(self):
         t = self.call('a', 'task.create', title='change one', scope=['src/foo.py'])['task']
@@ -56,7 +58,7 @@ class BoardTest(unittest.TestCase):
         self.assertTrue(any(n['recipient']=='b' for n in s['notices'].values()))
         fixes=[t for t in s['tasks'].values() if t['correction']]
         self.assertEqual(len(fixes),1); self.assertEqual(fixes[0]['priority'],'urgent')
-        snapshot=copy.deepcopy(s); self.board.cache_path.unlink(); self.assertEqual(snapshot,self.board.read_state())
+        self.assertEqual(s, self.rebuilt())
     def test_source_changed_after_moderator_snapshot_is_rejected(self):
         proof=self.proof('before'); post=self.call('a','post.create',kind='finding',text='before',evidence=[proof])['post']
         lease=self.call('a','moderation.claim',posts=[{'id':post,'revision':1}])['lease']
@@ -80,8 +82,10 @@ class BoardTest(unittest.TestCase):
         self.assertEqual(res['status'],'rejected')
         self.assertEqual(self.board.read_state()['posts'][post]['status'],'disputed')
     def test_corrupt_cache_is_rebuilt(self):
-        before=self.board.read_state(); self.board.cache_path.write_text('{broken')
-        self.assertEqual(self.board.read_state(),before)
+        self.board.save_after = 0; before = self.board.read_state()
+        self.assertTrue(self.board.cache_path.exists())
+        self.board.cache_path.write_text('{broken')
+        self.assertEqual(Board(self.path / 'board').read_state(), before)
     def test_offline_receipt_eventually_acknowledged(self):
         from unittest.mock import patch
         from collab_core.journal import JournalBusy
@@ -110,14 +114,16 @@ class BoardTest(unittest.TestCase):
         self.assertIn(work['id'],self.board.read_state()['posts'])
 
     def test_forged_cache_cannot_authorize_new_event(self):
-        from collab_core.board import canonical,digest
+        from collab_core.board import canonical
         task=self.call('a','task.create',title='Owned by a')['task']
-        self.board.read_state(); cache=json.loads(self.board.cache_path.read_text())
-        cache['state']['tasks'][task]['owner']='b';cache.pop('sha256')
-        cache['sha256']=digest(canonical(cache));self.board.cache_path.write_bytes(canonical(cache))
-        res=self.board.submit(self.board.request('b','task.block',{'task':task,'expected':1,'reason':'Forged ownership'}))
+        self.board.save_after = 0; self.board.read_state()
+        header, saved, requests = self.board.cache_path.read_bytes().splitlines()
+        forged = json.loads(saved); forged['tasks'][task]['owner'] = 'b'
+        self.board.cache_path.write_bytes(b'\n'.join([header, canonical(forged), requests]) + b'\n')
+        board = Board(self.path / 'board')
+        res=board.submit(board.request('b','task.block',{'task':task,'expected':1,'reason':'Forged ownership'}))
         self.assertEqual(res['status'],'rejected')
-        self.board.cache_path.unlink();self.assertEqual(self.board.read_state()['tasks'][task]['owner'],'a')
+        self.assertEqual(self.rebuilt()['tasks'][task]['owner'],'a')
     def test_malformed_nested_receipt_does_not_stall_following_work(self):
         bad=self.board.submit(self.board.request('a','delivery.prepare',{'items':['bad']}))
         self.assertEqual(bad['status'],'rejected')

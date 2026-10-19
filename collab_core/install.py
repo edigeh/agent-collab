@@ -227,7 +227,7 @@ def _launcher(prefix, home_default=None, receipts_default=None):
     return ("#!/bin/sh\n" + LAUNCHER_MARKER + "\n" +
             f"export COLLAB_HOME=${{COLLAB_HOME:-{quoted_home}}}\n" +
             f"export COLLAB_RECEIPTS=${{COLLAB_RECEIPTS:-{quoted_receipts}}}\n" +
-            f"exec {quoted_python} {quoted_prefix}/current/collab \"$@\"\n").encode("utf-8")
+            f"exec {quoted_python} -S {quoted_prefix}/current/collab \"$@\"\n").encode("utf-8")
 
 
 def _viewer_launcher(prefix, home_default=None, receipts_default=None):

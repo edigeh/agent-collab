@@ -95,16 +95,26 @@ def _git_root(cwd):
         return Path(cwd).resolve()
 
 
-def _automatic_project(board, actor, cwd):
-    root = _git_root(cwd); root_text = str(root)
+def _checkout(cwd):
+    """The repository root shared by all worktrees, and this checkout's own top level."""
+    root = _git_root(cwd)
     try:
         checkout = subprocess.check_output(['git','-C',str(cwd),'rev-parse','--show-toplevel'],
                          text=True, stderr=subprocess.DEVNULL).strip()
         checkout = str(Path(checkout).resolve())
     except (OSError, subprocess.CalledProcessError):
         checkout = str(Path(cwd).resolve())
+    return root, checkout
+
+
+def _known_project(state, root, checkout):
+    return next((p for p in state['projects'].values() if str(root) in p['roots'] or checkout in p['roots']), None)
+
+
+def _automatic_project(board, actor, cwd):
+    root, checkout = _checkout(cwd); root_text = str(root)
     state = board.read_state()
-    project = next((p for p in state['projects'].values() if root_text in p['roots'] or checkout in p['roots']), None)
+    project = _known_project(state, root, checkout)
     if project is None:
         project_id = 'auto-' + hashlib.sha256(root_text.encode()).hexdigest()[:16]
         if project_id in state['projects']:
@@ -165,6 +175,7 @@ def _wake(args):
         return {**registered, 'session':actor, 'sync':replayed,
                 'warning':'Board unavailable; continue authorized work, keep this session ID, and sync later. ' + str(exc)}
     prior = state["sessions"].get(actor)
+    attach = False
     if prior:
         if prior["harness"] != args.harness:
             raise CliError("session already belongs to harness " + prior["harness"])
@@ -176,24 +187,30 @@ def _wake(args):
     else:
         if args.project and args.project not in state["projects"]:
             raise CliError("unknown project: " + args.project)
-        # state.session.register requires an existing project, while project.create
-        # requires an existing actor.  Register globally first to establish the
-        # participant, then move it to an explicit or automatic project.
         parent = args.parent
         name = args.name or actor
-        bootstrap = _outcome(board, actor, "session.register", {
-            "harness": args.harness, "project": "global", "parent": parent, "name": name,
-        })
-        if bootstrap.get("status") != "accepted":
-            return {"session": actor, "sync": replayed, "registration": bootstrap}
         project = args.project
         if not project:
+            root, checkout = _checkout(Path.cwd())
+            known = _known_project(state, root, checkout)
+            project, attach = (known["id"], checkout not in known["roots"]) if known else (None, False)
+        if not project:
+            # state.session.register requires an existing project, while project.create
+            # requires an existing actor.  Register globally first to establish the
+            # participant, then move it to the new automatic project.
+            bootstrap = _outcome(board, actor, "session.register", {
+                "harness": args.harness, "project": "global", "parent": parent, "name": name,
+            })
+            if bootstrap.get("status") != "accepted":
+                return {"session": actor, "sync": replayed, "registration": bootstrap}
             project, _ = _automatic_project(board, actor, Path.cwd())
     registered = _outcome(board, actor, "session.register", {
         "harness": args.harness, "project": project, "parent": parent, "name": name, **extra,
     })
     if registered.get("status") != "accepted":
         return {"session": actor, "sync": replayed, "registration": registered}
+    if attach:
+        _automatic_project(board, actor, Path.cwd())  # a new worktree of a known repository
     brief = board.brief(actor, project=project, limit=args.limit, offset=0,
                         view=args.view, budget=args.budget if args.view == 'compact' else None)
     next_commands = []
@@ -367,7 +384,7 @@ def _human(value):
     status = value.get("status") if isinstance(value, dict) else None
     lines = [str(status or "accepted")]
     if isinstance(value, dict):
-        for key in ("session", "project", "post", "task", "delivery", "next_cursor", "sha256", "path", "bytes", "token", "removal", "sessions", "active_tasks", "open_requests", "disputed_posts", "view", "returned", "budget", "truncated", "error", "warning"):
+        for key in ("session", "project", "post", "task", "delivery", "next_cursor", "sha256", "path", "bytes", "token", "removal", "sessions", "active_tasks", "open_requests", "disputed_posts", "view", "returned", "budget", "truncated", "records", "match", "error", "warning"):
             if key in value:
                 lines.append(f"{key}: {value[key]}")
         for ref in value.get("references", []):
@@ -430,6 +447,7 @@ def build_parser():
     bye = sub.add_parser("bye", help="sign off, leaving an optional hand-off note"); bye.add_argument("--summary", help="where you left off (at most 280 bytes)"); bye.set_defaults(handler=_bye)
     who = sub.add_parser("who", help="list online agents without writing to the board"); who.add_argument("--project"); who.set_defaults(handler=_who)
     sync = sub.add_parser("sync"); sync.set_defaults(handler=lambda a: {"status": "accepted", "results": _board(a).sync(_session(a))})
+    verify = sub.add_parser("verify", help="replay the whole journal and compare it with the saved view"); verify.set_defaults(handler=lambda a: _board(a).verify())
     project = sub.add_parser("project"); ps = project.add_subparsers(dest="project_command", required=True)
     ps.add_parser("list").set_defaults(handler=_project)
     create = ps.add_parser("create"); create.add_argument("name"); create.add_argument("id"); create.add_argument("--root", action="append", default=[]); create.set_defaults(handler=_project)
