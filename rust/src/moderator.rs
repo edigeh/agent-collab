@@ -21,7 +21,27 @@ pub const MODELS: [(&str, &str); 4] = [
     ("omp", "opencode-go/deepseek-v4.1-flash"),
 ];
 
-pub const SCHEMA: &str = r#"{"additionalProperties":false,"properties":{"outcomes":{"items":{"additionalProperties":false,"properties":{"evidence":{"items":{"type":"string"},"type":"array"},"post":{"type":"string"},"reason":{"type":"string"},"source_fixes":{"items":{"additionalProperties":false,"properties":{"project":{"type":"string"},"reason":{"type":"string"},"source":{"type":"string"}},"required":["project","source","reason"],"type":"object"},"type":"array"},"status":{"enum":["supported","unsupported","disputed","corrected","superseded"],"type":"string"},"text":{"type":"string"}},"required":["post","status","reason","text","evidence","source_fixes"],"type":"object"},"type":"array"}},"required":["outcomes"],"type":"object"}"#;
+pub const OUTCOME_SCHEMA: &str = r#"{"additionalProperties":false,"properties":{"evidence":{"items":{"type":"string"},"type":"array"},"reason":{"maxLength":8000,"minLength":1,"type":"string"},"source_fixes":{"items":{"additionalProperties":false,"properties":{"project":{"type":"string"},"reason":{"type":"string"},"source":{"type":"string"}},"required":["project","source","reason"],"type":"object"},"type":"array"},"status":{"enum":["supported","unsupported","disputed","corrected","superseded"],"type":"string"},"text":{"type":"string"}},"required":["status","reason","text","evidence","source_fixes"],"type":"object"}"#;
+
+pub fn response_schema(bundle: &Value) -> Result<Value> {
+    let mut properties = Map::new();
+    let available: Vec<Value> = bundle.at("sources").as_arr().into_iter().flatten()
+        .filter(|s| s.at("available").truthy()).map(|s| s.at("id").clone()).collect();
+    for target in bundle.at("targets").as_arr().into_iter().flatten() {
+        let mut outcome = json::parse(OUTCOME_SCHEMA.as_bytes(), json::LENIENT).expect("valid outcome schema");
+        let evidence = outcome.get_mut("properties").unwrap().get_mut("evidence").unwrap();
+        if available.is_empty() {
+            evidence.as_obj_mut().unwrap().insert("maxItems", 0i64);
+        } else {
+            evidence.get_mut("items").unwrap().as_obj_mut().unwrap().insert("enum", available.clone());
+        }
+        properties.insert(state::py_str(target.at("post")), outcome);
+    }
+    let required: Vec<Value> = properties.keys().map(Value::from).collect();
+    Ok(obj! {"type" => "object", "additionalProperties" => false, "required" => vec![Value::from("outcomes")],
+        "properties" => obj! {"outcomes" => obj! {"type" => "object", "additionalProperties" => false,
+            "required" => required, "properties" => Value::Obj(properties)}}})
+}
 
 pub const PROMPT: &str = include_str!("moderator_prompt.txt");
 const OMP_OVERLAY: &[u8] = include_bytes!("omp_overlay.yml");
@@ -87,12 +107,12 @@ pub fn build_bundle(board: &Board, posts: &[Value]) -> Result<(Value, Map)> {
         eid
     };
     let mut targets = Vec::new();
-    for reference in posts {
+    for (target_index, reference) in posts.iter().enumerate() {
         let key = state::entity(&s, T::Posts, reference.at("id"))?;
         let p = s.get(T::Posts, key).expect("entity checked");
         let reports: Vec<Value> = p.at("reports").as_arr().cloned().unwrap_or_default();
         let mut target = crate::cli_map(obj! {
-            "post" => p.at("id").clone(), "revision" => p.at("revision").clone(), "project" => p.at("project").clone(),
+            "post" => format!("t{target_index}"), "revision" => p.at("revision").clone(), "project" => p.at("project").clone(),
             "claim" => p.at("text").clone(), "status" => p.at("status").clone(), "evidence" => Vec::<Value>::new(),
             "reports" => reports[reports.len().saturating_sub(4)..].to_vec(),
         });
@@ -159,27 +179,22 @@ pub fn parse_result(raw: Value, refs: &[Value], evidence_map: &Map, bundle: &Val
         other => other,
     };
     let outcomes = match &raw {
-        Value::Obj(m) if m.len() == 1 && m.get("outcomes").is_some_and(Value::is_arr) => m.get("outcomes").unwrap().as_arr().unwrap(),
+        Value::Obj(m) if m.len() == 1 && m.get("outcomes").is_some_and(Value::is_obj) => m.get("outcomes").unwrap().as_obj().unwrap(),
         _ => return unavailable("invalid moderation object"),
     };
-    let wanted: std::collections::HashSet<String> = refs.iter().map(|r| state::py_str(r.at("id"))).collect();
-    if outcomes.len() != wanted.len() {
+    let wanted: std::collections::HashSet<String> = (0..refs.len()).map(|i| format!("t{i}")).collect();
+    if outcomes.len() != wanted.len() || outcomes.keys().any(|k| !wanted.contains(k)) {
         return unavailable("moderator did not cover the complete batch");
     }
     let allowed_projects: std::collections::HashSet<String> =
         bundle.at("projects").as_arr().map(|a| a.iter().map(|p| state::py_str(p.at("id"))).collect()).unwrap_or_default();
-    let fields = ["post", "status", "reason", "text", "evidence", "source_fixes"];
-    let mut seen = std::collections::HashSet::new();
+    let fields = ["status", "reason", "text", "evidence", "source_fixes"];
     let mut converted = Vec::new();
-    for out in outcomes {
+    for (index, reference) in refs.iter().enumerate() {
+        let out = outcomes.get(&format!("t{index}")).unwrap();
         let Some(m) = out.as_obj().filter(|m| m.len() == fields.len() && fields.iter().all(|f| m.contains_key(f))) else {
             return unavailable("invalid moderation outcome fields");
         };
-        let post = match out.at("post").as_str() {
-            Some(p) if wanted.contains(p) && !seen.contains(p) => p.to_string(),
-            _ => return unavailable("unknown/duplicate moderation target"),
-        };
-        seen.insert(post);
         let status = out.at("status").as_str().unwrap_or("");
         if !["supported", "unsupported", "disputed", "corrected", "superseded"].contains(&status) || !out.at("status").is_str() {
             return unavailable("invalid moderation classification");
@@ -227,6 +242,7 @@ pub fn parse_result(raw: Value, refs: &[Value], evidence_map: &Map, bundle: &Val
             }
         }
         let mut result = m.clone();
+        result.insert("post", reference.at("id").clone());
         result.insert("evidence", unique.into_iter().map(|e| evidence_map.get(e).unwrap().clone()).collect::<Vec<_>>());
         converted.push(Value::Obj(result));
     }
@@ -257,9 +273,14 @@ pub fn invoke(harness: &str, prompt: String, run_dir: &Path, timeout: f64) -> Re
         .create(run_dir)
         .map_err(|e| Error::from(pyfmt::with_path(e, run_dir)))?;
     let schema_path = run_dir.join("schema.json");
-    atomic(&schema_path, SCHEMA.as_bytes())?;
+    let Some((_, bundle_json)) = prompt.split_once("EVIDENCE_BUNDLE:\n") else {
+        return unavailable("moderation prompt has no evidence bundle");
+    };
+    let bundle = json::parse(bundle_json.as_bytes(), json::LENIENT).map_err(|_| Error::Value("invalid moderation evidence bundle".into()))?;
+    let schema = String::from_utf8(json::canonical(&response_schema(&bundle)?)).unwrap();
+    atomic(&schema_path, schema.as_bytes())?;
     let final_path = run_dir.join("result.json");
-    let prompt = if harness == "pi" || harness == "omp" { format!("REQUIRED_RESPONSE_JSON_SCHEMA:\n{SCHEMA}\n\n{prompt}") } else { prompt };
+    let prompt = if harness == "pi" || harness == "omp" { format!("REQUIRED_RESPONSE_JSON_SCHEMA:\n{schema}\n\n{prompt}") } else { prompt };
     let b = pyfmt::path_str(&binary);
     let s = |x: &str| x.to_string();
     let argv: Vec<String> = match harness {
@@ -270,7 +291,7 @@ pub fn invoke(harness: &str, prompt: String, run_dir: &Path, timeout: f64) -> Re
         ],
         "claude" => vec![
             b, s("--print"), s("--model"), chosen.clone(), s("--output-format"), s("json"),
-            s("--json-schema"), s(SCHEMA), s("--tools"), s(""),
+            s("--json-schema"), schema.clone(), s("--tools"), s(""),
             s("--strict-mcp-config"), s("--mcp-config"), s(r#"{"mcpServers":{}}"#),
             s("--permission-mode"), s("dontAsk"), s("--permission-prompts"), s("none"), s("--no-session-persistence"),
         ],
@@ -418,10 +439,20 @@ pub fn run_moderation(board: &Board, session: &str, project: Option<&str>, force
         _ => state::py_str(parent.at("project")),
     };
     board.check_sources(session, &project, 8)?;
-    let refs = board.due(Some(&project), 4, force)?;
+    let mut refs = board.due(Some(&project), 4, force)?;
     if refs.is_empty() {
         return Ok(obj! {"status" => "idle", "message" => "No moderation batch due."});
     }
+    let (bundle, evidence_map) = loop {
+        match build_bundle(board, &refs) {
+            Ok(bundle) => break bundle,
+            Err(e) if e.message() == "evidence batch exceeds bounded prompt size; retry a smaller batch" && refs.len() > 1 => {
+                refs.truncate((refs.len() / 2).max(1));
+            }
+            Err(e) if caught(&e) => return Ok(obj! {"status" => "pending", "error" => e.message(), "model" => chosen}),
+            Err(e) => return Err(e),
+        }
+    };
     let child = format!("m-{}", pyfmt::uuid4());
     let registered = board.submit(board.request(
         &child,
@@ -433,12 +464,14 @@ pub fn run_moderation(board: &Board, session: &str, project: Option<&str>, force
     }
     let claimed = board.submit(board.request(&child, "moderation.claim", obj! {"posts" => refs.clone(), "seconds" => 600i64}))?;
     if claimed.at("status").as_str() != Some("accepted") {
+        board.submit(board.request(&child, "session.touch", obj! {"leave" => true, "summary" => "Moderation claim was not accepted."}))?;
         return Ok(claimed);
     }
     let lease = state::py_str(claimed.at("lease"));
     let run_dir = board.root.join("runs").join(&lease);
     let attempt = (|| -> Result<Value> {
-        let (bundle, evidence_map) = build_bundle(board, &refs)?;
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&run_dir)?;
+        atomic(&run_dir.join("targets.json"), &json::canonical(&Value::Arr(refs.clone())))?;
         let prompt = format!("{PROMPT}{}", String::from_utf8(json::canonical(&bundle)).unwrap_or_default());
         let raw = invoke(&harness, prompt, &run_dir, 180.0)?;
         let outcomes = parse_result(raw, &refs, &evidence_map, &bundle)?;
@@ -455,7 +488,7 @@ pub fn run_moderation(board: &Board, session: &str, project: Option<&str>, force
         out.insert("run_dir", pyfmt::path_str(&run_dir));
         Ok(Value::Obj(out))
     })();
-    match attempt {
+    let mut result = match attempt {
         Ok(v) => Ok(v),
         Err(e) if caught(&e) => {
             let released = board.submit(board.request(&child, "moderation.release", obj! {"lease" => lease.clone(), "reason" => e.message()}))?;
@@ -465,5 +498,12 @@ pub fn run_moderation(board: &Board, session: &str, project: Option<&str>, force
             })
         }
         Err(e) => Err(e),
+    };
+    let signoff = board.submit(board.request(&child, "session.touch", obj! {"leave" => true, "summary" => "Moderation worker finished; result preserved in the journal."}))?;
+    if signoff.at("status").as_str() != Some("accepted") {
+        if let Ok(value) = &mut result {
+            value.as_obj_mut().unwrap().insert("worker_signoff", signoff);
+        }
     }
+    result
 }

@@ -13,7 +13,7 @@ class Boundaries(unittest.TestCase):
         self.proof=self.b.capture(self.source)
         self.post=self.b.submit(self.b.request('a','post.create',{'kind':'finding','text':'Claim','evidence':[self.proof]}))['post']
     def response(self):
-        return {'outcomes':[{'post':self.post,'status':'corrected','reason':'Observed','text':'Fixed','evidence':['e0'],'source_fixes':[]}]}
+        return {'outcomes':{'t0':{'status':'corrected','reason':'Observed','text':'Fixed','evidence':['e0'],'source_fixes':[]}}}
     def test_malformed_outcome_receipt_does_not_poison_sync(self):
         r=self.b.submit(self.b.request('a','moderation.apply',{'lease':'x','outcomes':[{'post':[]}]}))
         self.assertEqual(r['status'],'rejected')
@@ -29,8 +29,8 @@ class Boundaries(unittest.TestCase):
     def test_malformed_model_releases_lease(self):
         for field in ('post','source','project'):
             raw=self.response()
-            if field=='post':raw['outcomes'][0]['post']=[]
-            else:raw['outcomes'][0]['source_fixes']=[{'source':str(self.source),'project':'global','reason':'why',field:[]}]
+            if field=='post':raw['outcomes']['t0']['post']=[]
+            else:raw['outcomes']['t0']['source_fixes']=[{'source':str(self.source),'project':'global','reason':'why',field:[]}]
             result=run_moderation(self.b,'a',force=True,runner=lambda *args:raw)
             self.assertEqual(result['status'],'pending')
             self.assertTrue(self.b.due('global',force=True))
@@ -49,7 +49,7 @@ class Boundaries(unittest.TestCase):
         other=self.root/'other';other.write_text('Other proof')
         proof=self.b.capture(other)
         self.b.submit(self.b.request('a','post.report',{'post':self.post,'expected':1,'reason':'check','evidence':[proof]}))
-        raw=self.response();raw['outcomes'][0]['source_fixes']=[{'source':str(other),'project':'global','reason':'Change it'}]
+        raw=self.response();raw['outcomes']['t0']['source_fixes']=[{'source':str(other),'project':'global','reason':'Change it'}]
         result=run_moderation(self.b,'a',force=True,runner=lambda *args:raw)
         self.assertEqual(result['status'],'pending')
         self.assertEqual(self.b.read_state()['tasks'],{})

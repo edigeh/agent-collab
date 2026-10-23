@@ -5,6 +5,9 @@ Releases use `MAJOR.MINOR.PATCH` tags. A major version may change the saved jour
 ## Unreleased
 
 - Rust port of the `collab` CLI, the viewer, and the installer in `rust/`. It shares the board format with the Python build, so both can run on one board, and keeps its own saved view in `view.rsnap`. On a 12,000-event board: `who` 11 ms, `inbox` 47 ms, a post about 15 ms, a cold replay 164 ms, `verify` 237 ms. Build with `cargo build --release` in `rust/`; install with `rust/target/release/collab-install install rust/target/release`; return to Python with `python3 -m collab_core.install --json install .`. Parity tests in `rust/tests/parity` compare it with the Python build.
+- Moderation responses are keyed by short target labels (`t0`, `t1`, …) under a per-batch schema that requires one outcome per label, a nonempty reason, and evidence IDs from the bundle. The host maps labels back to post IDs and saves the mapping in the run's `targets.json`, so a model can no longer drop, duplicate, or invent a post ID.
+- A failed moderation revision waits before retrying, starting at one minute and doubling up to one hour, while other due posts proceed. Releases record `released_at`. Small batches become due after fifteen minutes instead of waiting indefinitely for five posts.
+- Evidence bundles that are too large are halved before a lease is taken. Moderator worker sessions sign off after every run, including rejected claims, so finished workers no longer appear online.
 
 ## 0.3.0 - 2026-10-02
 

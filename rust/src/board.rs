@@ -945,19 +945,37 @@ impl Board {
     pub fn due_in(s: &State, project: Option<&str>, limit: usize, force: bool) -> Result<Vec<Value>> {
         let now = Ts::now();
         let mut busy = HashSet::new();
+        let mut failures: HashMap<(String, i64), (u32, Ts)> = HashMap::new();
         for lease in s.values(T::Leases) {
             if lease.at("status").as_str() == Some("active") && state::timestamp(lease.at("expires"))? > now {
                 if let Some(g) = lease.at("generations").as_obj() {
                     busy.extend(g.keys().cloned());
                 }
             }
+            if lease.at("status").as_str() == Some("released") && lease.at("released_at").truthy() {
+                let released = state::timestamp(lease.at("released_at"))?;
+                for reference in lease.at("posts").as_arr().into_iter().flatten() {
+                    let key = (state::py_str(reference.at("id")), reference.at("revision").as_int().unwrap_or(0));
+                    let failure = failures.entry(key).or_insert((0, released));
+                    failure.0 += 1;
+                    if released > failure.1 { failure.1 = released; }
+                }
+            }
         }
+        let key = |p: &Value| (state::py_str(p.at("id")), p.at("revision").as_int().unwrap_or(0));
         let mut posts: Vec<&Value> = s
             .values(T::Posts)
-            .filter(|p| p.at("due").truthy() && !busy.contains(&state::py_str(p.at("id"))) && project.is_none_or(|pr| p.at("project").as_str() == Some(pr)))
+            .filter(|p| {
+                let ready = force || failures.get(&key(p)).is_none_or(|(count, last)| {
+                    now.diff_seconds(last) >= (60i64 * (1i64 << (count - 1).min(6))).min(3600) as f64
+                });
+                p.at("due").truthy() && !busy.contains(&state::py_str(p.at("id")))
+                    && project.is_none_or(|pr| p.at("project").as_str() == Some(pr)) && ready
+            })
             .collect();
-        posts.sort_by_cached_key(|p| (!p.at("urgent").truthy(), state::py_str(p.at("created_at")), state::py_str(p.at("id"))));
-        if !force && posts.len() < 5 && !posts.iter().any(|p| p.at("urgent").truthy()) {
+        posts.sort_by_cached_key(|p| (!p.at("urgent").truthy(), if force { 0 } else { failures.get(&key(p)).map(|f| f.0).unwrap_or(0) }, state::py_str(p.at("created_at")), state::py_str(p.at("id"))));
+        let old = posts.iter().any(|p| state::timestamp(p.at("created_at")).is_ok_and(|created| now.diff_seconds(&created) >= 900.0));
+        if !force && posts.len() < 5 && !posts.iter().any(|p| p.at("urgent").truthy()) && !old {
             return Ok(Vec::new());
         }
         Ok(posts.into_iter().take(limit).map(|p| crate::obj! {"id" => p.at("id").clone(), "revision" => p.at("revision").clone()}).collect())

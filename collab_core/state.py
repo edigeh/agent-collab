@@ -410,6 +410,7 @@ def apply(state, request, recorded_at, *, copy_state=True):
         lease = entity(s, 'leases', d.get('lease')); require(lease['actor'] == actor and lease['status'] == 'active', 'invalid moderation owner/state')
         if op == 'moderation.release':
             lease['status'] = 'released'; lease['reason'] = text(d.get('reason'))
+            lease['released_at'] = recorded_at
         else:
             require(timestamp(lease['expires']) > now, 'moderation lease expired')
             outcomes = d.get('outcomes'); require(isinstance(outcomes, list), 'outcomes must be a list')

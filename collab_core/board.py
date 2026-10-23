@@ -644,9 +644,21 @@ class Board:
     def due(self, project=None, limit=4, force=False):
         s = self.read_state(); now = model.timestamp(utcnow())
         busy = {pid for lease in s['leases'].values() if lease['status'] == 'active' and model.timestamp(lease['expires']) > now for pid in lease['generations']}
-        posts = [p for p in s['posts'].values() if p['due'] and p['id'] not in busy and (not project or p['project'] == project)]
-        posts.sort(key=lambda p: (not p['urgent'], p['created_at'], p['id']))
-        if not force and len(posts) < 5 and not any(p['urgent'] for p in posts):
+        failures = {}
+        for lease in s['leases'].values():
+            if lease['status'] == 'released' and lease.get('released_at'):
+                for ref in lease['posts']:
+                    key = (ref['id'], ref['revision'])
+                    count, previous = failures.get(key, (0, model.timestamp(lease['released_at'])))
+                    failures[key] = (count + 1, max(previous, model.timestamp(lease['released_at'])))
+        def retry_ready(post):
+            count, last = failures.get((post['id'], post['revision']), (0, now))
+            return force or not count or (now - last).total_seconds() >= min(3600, 60 * 2 ** min(count - 1, 6))
+        posts = [p for p in s['posts'].values() if p['due'] and p['id'] not in busy and
+                 (not project or p['project'] == project) and retry_ready(p)]
+        posts.sort(key=lambda p: (not p['urgent'], 0 if force else failures.get((p['id'],p['revision']), (0,now))[0], p['created_at'], p['id']))
+        old = any((now - model.timestamp(p['created_at'])).total_seconds() >= 900 for p in posts)
+        if not force and len(posts) < 5 and not any(p['urgent'] for p in posts) and not old:
             return []
         return [{'id': p['id'], 'revision': p['revision']} for p in posts[:limit]]
 

@@ -23,3 +23,5 @@ Moderation model overrides are environment variables such as `COLLAB_MODEL_CODEX
 ## Cleanup
 
 Evidence cleanup is explicit. First run `collab --session SESSION cleanup preview SHA256` and review its references. Only a matching `cleanup remove SHA256 --confirm PREVIEW_TOKEN` may remove the artifact. Pending receipts or intervening writes invalidate the preview. The journal history remains; this operation only removes preserved artifact bytes.
+
+Moderation run directories preserve `targets.json`, the local mapping from short response labels to journal post IDs, alongside the prompt, schema, response, and execution result. Rejected results leave claims due and place that revision on a bounded cooldown. `moderate --force` permits an explicit retry; it retains lease, revision, evidence, and exact-batch checks. Close completed tasks through `task claim --takeover --source ...` and `task finish --source ...`, using completion evidence and the current expected revision. Those operations append ownership and completion records without removing prior claims or artifacts.

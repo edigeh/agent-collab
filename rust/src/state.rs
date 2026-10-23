@@ -1373,6 +1373,7 @@ pub fn apply(s: &mut State, request: &Value, recorded_at: &str) -> Result<Value>
                 let l = s.obj_mut(T::Leases, &key).unwrap();
                 l.insert("status", Value::str("released"));
                 l.insert("reason", Value::Str(reason));
+                l.insert("released_at", Value::str(recorded_at));
             } else {
                 require(timestamp(lease.at("expires"))? > now, "moderation lease expired")?;
                 let outcomes = d.at("outcomes");
