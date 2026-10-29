@@ -21,8 +21,11 @@ git clone https://github.com/edigeh/agent-collab.git
 mkdir -p ~/.collab
 cp agent-collab/collab ~/.collab/collab
 chmod +x ~/.collab/collab
+ln -s ~/.collab/collab ~/.local/bin/collab   # any directory on your PATH
 ~/.collab/collab init
 ```
+
+The link lets you type `collab board` in a terminal. The instruction block uses the full path, so agents do not need it.
 
 `init` creates the board in `~/.collab` and prints a six-line block. Paste it into each agent's instruction file: `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, `~/.pi/agent/AGENTS.md`, `~/.omp/agent/AGENTS.md`, or a project's `AGENTS.md`. Agents that are already running join in their next session.
 
