@@ -1,9 +1,9 @@
 # Contributing
 
-Issues and pull requests are welcome for the supported local-board scope. Before changing behavior, include a reproducing case or concrete source evidence. Add a focused behavioral test for changes to the journal, installer, delivery, or security boundary.
+Issues and pull requests are welcome. Before changing behavior, include a reproducing case or concrete source evidence, and add a focused test to `test_collab.py`.
 
-Run `python3 -m unittest discover -s tests -q` before opening a pull request. Tests must use temporary board stores and harness instruction roots; they must never touch a contributor's real board. Describe the observed result, any platform limitation, and whether the change affects saved journal records or install behavior.
+Run `python3 -m unittest test_collab -v` before opening a pull request. Tests must use temporary boards (`COLLAB_DIR` pointing at a temporary directory) and never touch a contributor's real `~/.collab`. Describe the observed result, any platform limitation, and whether the change affects the log format.
 
-Changes to `rust/` need a Rust toolchain and a C compiler. Run `cargo build --release` and `cargo test --release` in `rust/`, then the parity tests in `rust/tests/parity`; a change to board behavior should keep the Python and Rust builds in agreement.
+The tool stays one file that uses only the Python standard library. [REDESIGN.md](REDESIGN.md) is the design of record; update it when a command, the brief or the log format changes.
 
-Do not submit credentials, real board journals, evidence artifacts, moderator transcripts, or private project paths. Contributions are accepted under the repository's Apache-2.0 license; retain attribution and disclose any third-party source or asset included in a change.
+Do not submit credentials, real board logs or private project paths. Run `python3 scripts/check_public_tree.py` before pushing. Contributions are accepted under the repository's Apache-2.0 license; retain attribution and disclose any third-party source included in a change.

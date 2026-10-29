@@ -10,13 +10,10 @@ ROADMAP.md
 OPEN_SOURCE_PLAN.md
 
 # Board data must never enter the source repository.
-.agent-collab/
-.agent-collab-receipts/
-events.jsonl
-*.jsonl.lock
-view.json
-view.key
-source-checks.json
-/artifacts/
-/runs/
-/backups/
+LOG.txt
+.lock
+config.tmp
+/config
+
+# Build output left by the 0.3 Rust port.
+/rust/
