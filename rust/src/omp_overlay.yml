@@ -1,5 +1,0 @@
-disabledExtensions:
-  - context-file:user:AGENTS.md
-  - context-file:project:AGENTS.md
-  - context-file:user:CLAUDE.md
-  - context-file:project:CLAUDE.md
