@@ -720,7 +720,7 @@ def brief(s, me, project, root, note=""):
     recent = [r for r in reversed(s["recs"]) if r.project == project and
               r.time >= since and r.kind in ("say", "ask", "reply", "fix")
               and r.id not in skip]
-    ids = {r.id for r in recent}
+    ids = {r.id for r in recent} | skip
     recent = [r for r in recent if r.kind != "fix" or
               not (r.target[1:].isdigit() and int(r.target[1:]) in ids)]
     lines = []

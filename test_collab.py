@@ -269,6 +269,12 @@ class Brief(Base):
                       "    fix #1 carl-0003: it is eb363ce0", out)
         self.assertIn("└ #1", self.out("board", "--plain", "--project", "p"))
 
+    def test_fix_of_a_shown_ask_is_not_repeated(self):
+        self.out("ask", "p", "who owns cookies?", "--project", "p", agent="bob-0002")
+        self.out("fix", "#0", "session cookies only", "--project", "p", agent="bob-0002")
+        out = self.out("wake", "--project", "p")
+        self.assertEqual(out.count("session cookies only"), 1, out)
+
     def test_claim_overlap_and_bye_release(self):
         self.out("doing", "porting the parser", "--project", "p", agent="bob-0002")
         target = os.path.join(self.work, "rust")
@@ -589,7 +595,8 @@ class Limits(Base):
     def test_invisible_characters_are_dropped(self):
         sneaky = "a\U000E0041b​c﻿d e fg‮h"
         self.out("say", sneaky, "--project", "p")
-        raw = open(os.path.join(self.d, "LOG.txt"), encoding="utf-8").read()
+        with open(os.path.join(self.d, "LOG.txt"), encoding="utf-8") as f:
+            raw = f.read()
         self.assertIn(" abcdefgh", raw)
         self.write_log([(C.stamp(), "x-1", "p", "say", "", sneaky)])
         for args in (("log", "--project", "p"), ("wake", "--project", "p")):
